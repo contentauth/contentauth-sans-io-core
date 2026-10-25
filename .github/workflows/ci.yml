@@ -63,7 +63,7 @@ jobs:
       - name: Generate coverage including integration tests
         run: cargo llvm-cov --all-features --tests --lcov --output-path lcov.info
       - name: Filter test code from coverage
-        uses: scouten/uncover-tests@af7baaca5bf5189b968573d5f14627c2e1ea0704 # v1.1.0
+        uses: scouten/uncover-tests@33042d179886791f4de35ca390b95abb82f0e347 # v1.1.2
         with:
           input-file: lcov.info
           output-file: lcov.filtered.info
