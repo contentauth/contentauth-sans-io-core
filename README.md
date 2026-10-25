@@ -4,7 +4,7 @@
 [![crates.io](https://img.shields.io/crates/v/contentauth-sans-io-core.svg)](https://crates.io/crates/contentauth-sans-io-core)
 [![Documentation](https://docs.rs/contentauth-sans-io-core/badge.svg)](https://docs.rs/contentauth-sans-io-core)
 
-Host-driven, sans-I/O workflows for the C2PA and
+An experimental design for host-driven, sans-I/O workflows for the C2PA and
 CAWG SDKs, leaving I/O, concurrency, and scheduling to the host application.
 
 The goal is to let a library describe work without choosing how files,
@@ -214,6 +214,15 @@ cargo +nightly-2026-01-16 fmt --all
 cargo +nightly-2026-01-16 fmt --manifest-path fuzz/Cargo.toml
 ```
 
+TOML formatting uses [Taplo](https://taplo.tamasfe.dev/) with
+the repository's `.taplo.toml` configuration:
+
+```sh
+cargo install taplo-cli --locked
+taplo fmt
+taplo fmt --check
+```
+
 ## Testing and fuzzing
 
 The engine's bookkeeping is the one piece every session shares, so it is
@@ -275,8 +284,19 @@ production host implementations.
 
 This repository publishes only `contentauth-sans-io-core`. Release-plz
 publishes eligible releases and opens or updates a release PR on pushes to
-`main`. Use Conventional Commit titles for PRs so release notes and version
-bumps can be generated.
+`main`. PR titles are checked with `commitlint-rs` and `.commitlintrc.yml`
+so release notes and version bumps can be generated. Use an unscoped
+`fix`, `feat`, `chore`, `ci`, or `docs` type, followed by a capitalized
+description without a trailing period or space, for example
+`ci: Verify TOML formatting`. Automated release and dependency-update
+titles have explicit exceptions in the PR-title workflow.
+
+To check a title locally:
+
+```sh
+cargo install commitlint-rs --locked
+printf '%s\n' 'ci: Verify TOML formatting' | commitlint -g .commitlintrc.yml
+```
 
 Repository administrators must grant this repository access to these
 organization secrets:

@@ -1,0 +1,32 @@
+# Keep these rules in sync with .github/workflows/pr_title.yml and README.md.
+rules:
+  body-empty:
+    level: ignore
+
+  description-empty:
+    level: error
+
+  description-format:
+    level: error
+    format: ^[A-Z0-9].*[^. ]$
+
+  description-max-length:
+    level: warning
+    length: 70
+
+  scope:
+    level: error
+    optional: false
+    options: []
+
+  subject-empty:
+    level: error
+
+  type:
+    level: error
+    options:
+      - fix
+      - feat
+      - chore
+      - ci
+      - docs

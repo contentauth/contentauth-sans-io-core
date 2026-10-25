@@ -1,10 +1,10 @@
 [package]
-name = "contentauth-sans-io-core-fuzz"
-version = "0.0.0"
 description = "cargo-fuzz targets for contentauth-sans-io-core"
 edition = "2021"
-rust-version = "1.96.0"
+name = "contentauth-sans-io-core-fuzz"
 publish = false
+rust-version = "1.96.0"
+version = "0.0.0"
 
 # Keep libFuzzer's nightly toolchain and sanitizer flags separate from the
 # library's stable, Wasm, MSRV, and publishing checks.
@@ -20,15 +20,15 @@ libfuzzer-sys = "0.4"
 thiserror = "2.0.20"
 
 [[bin]]
+bench = false
+doc = false
 name = "session_core"
 path = "fuzz_targets/session_core.rs"
 test = false
-doc = false
-bench = false
 
 [[bin]]
+bench = false
+doc = false
 name = "fan_out_session"
 path = "fuzz_targets/fan_out_session.rs"
 test = false
-doc = false
-bench = false

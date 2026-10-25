@@ -112,6 +112,20 @@ jobs:
           cargo +nightly-2026-01-16 fmt --all -- --check
           cargo +nightly-2026-01-16 fmt --manifest-path fuzz/Cargo.toml -- --check
 
+  taplo_fmt:
+    name: Enforce TOML format
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install Taplo CLI
+        run: cargo install taplo-cli --locked
+      - name: Check TOML format
+        run: taplo fmt --check
+
   wasm:
     name: Wasm (${{ matrix.target }})
     runs-on: ubuntu-latest
