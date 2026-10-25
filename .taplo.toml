@@ -1,0 +1,6 @@
+exclude = ["target/**", "fuzz/target/**"]
+
+[formatting]
+array_padding = 0
+inline_table_padding = 1
+reorder_keys = true

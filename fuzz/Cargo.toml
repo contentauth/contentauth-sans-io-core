@@ -1,0 +1,34 @@
+[package]
+description = "cargo-fuzz targets for contentauth-sans-io-core"
+edition = "2021"
+name = "contentauth-sans-io-core-fuzz"
+publish = false
+rust-version = "1.96.0"
+version = "0.0.0"
+
+# Keep libFuzzer's nightly toolchain and sanitizer flags separate from the
+# library's stable, Wasm, MSRV, and publishing checks.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+contentauth-sans-io-core = { path = ".." }
+libfuzzer-sys = "0.4"
+# Only used by the shared harness in `../tests/support/model.rs`.
+thiserror = "2.0.20"
+
+[[bin]]
+bench = false
+doc = false
+name = "session_core"
+path = "fuzz_targets/session_core.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fan_out_session"
+path = "fuzz_targets/fan_out_session.rs"
+test = false

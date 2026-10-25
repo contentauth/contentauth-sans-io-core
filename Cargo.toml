@@ -1,0 +1,35 @@
+[package]
+authors = ["Eric Scouten <scouten@adobe.com>"]
+categories = ["api-bindings"]
+description = "Host-driven, sans-I/O workflows for C2PA and CAWG crates"
+documentation = "https://docs.rs/contentauth-sans-io-core"
+edition = "2021"
+homepage = "https://contentauthenticity.org"
+include = ["src/**", "tests/**", "Cargo.toml", "README.md", "LICENSE-*"]
+keywords = ["c2pa", "content-credentials", "sans-io"]
+license = "MIT OR Apache-2.0"
+name = "contentauth-sans-io-core"
+readme = "README.md"
+repository = "https://github.com/contentauth/contentauth-sans-io-core"
+rust-version = "1.96.0"
+version = "0.1.0"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+# Exposes `RequestTracker::fulfill_unchecked` outside this crate, for
+# downstream sessions' own tests that need to exercise a state machine's
+# defense-in-depth check against a reply payload `fulfill` itself would
+# reject.
+test-util = []
+
+[dependencies]
+thiserror = "2.0.20"
+
+[dev-dependencies]
+# Exercise wake-driven collections without an executor or runtime.
+futures-util = { version = "0.3.31", default-features = false, features = [
+  "alloc",
+] }
+proptest = { version = "1", default-features = false, features = ["std"] }
