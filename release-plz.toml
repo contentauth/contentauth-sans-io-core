@@ -42,4 +42,4 @@ commit_parsers = [
 dependencies_update = true
 pr_labels = ["release"]
 release_always = false
-release_commits = "^(feat|fix|docs|perf|update)[(:]"
+release_commits = "^(feat|fix|docs|perf|update)!?[(:]"
