@@ -11,7 +11,7 @@
 // specific language governing permissions and limitations under
 // each license.
 
-//! Property-based (generative) tests of the session machinery.
+//! Property-based (generative) tests of the workflow machinery.
 //!
 //! These run on every `cargo test` with `proptest`'s structured, shrinking
 //! generators, and drive the same harnesses (`tests/support/model.rs`) that
@@ -26,8 +26,8 @@ use proptest::prelude::*;
 mod model;
 
 use model::{
-    decode_core, decode_session, run_core, run_session, CoreOp, Kind, Reply, SessionOp,
-    SessionScript, Target,
+    decode_core, decode_workflow, run_core, run_workflow, CoreOp, Kind, Reply, Target, WorkflowOp,
+    WorkflowScript,
 };
 
 fn kind() -> impl Strategy<Value = Kind> {
@@ -38,7 +38,7 @@ fn reply() -> impl Strategy<Value = Reply> {
     prop_oneof![Just(Reply::A), Just(Reply::B), Just(Reply::Failed)]
 }
 
-/// Mostly IDs the session really issued, with a tail of arbitrary ones.
+/// Mostly IDs the workflow really issued, with a tail of arbitrary ones.
 fn target() -> impl Strategy<Value = Target> {
     prop_oneof![
         4 => any::<u8>().prop_map(Target::Issued),
@@ -58,11 +58,11 @@ fn core_op() -> impl Strategy<Value = CoreOp> {
     ]
 }
 
-fn session_op() -> impl Strategy<Value = SessionOp> {
+fn workflow_op() -> impl Strategy<Value = WorkflowOp> {
     prop_oneof![
-        3 => Just(SessionOp::Advance),
-        5 => (target(), reply()).prop_map(|(t, r)| SessionOp::Fulfill(t, r)),
-        1 => Just(SessionOp::Inspect),
+        3 => Just(WorkflowOp::Advance),
+        5 => (target(), reply()).prop_map(|(t, r)| WorkflowOp::Fulfill(t, r)),
+        1 => Just(WorkflowOp::Inspect),
     ]
 }
 
@@ -70,23 +70,23 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(512))]
 
     #[test]
-    fn session_core_matches_its_model(ops in prop::collection::vec(core_op(), 0..64)) {
+    fn workflow_core_matches_its_model(ops in prop::collection::vec(core_op(), 0..64)) {
         run_core(&ops);
     }
 
     #[test]
-    fn fan_out_session_matches_its_model(
+    fn fan_out_workflow_matches_its_model(
         n in 0u8..6,
-        ops in prop::collection::vec(session_op(), 0..64),
+        ops in prop::collection::vec(workflow_op(), 0..64),
     ) {
-        run_session(&SessionScript { n, ops });
+        run_workflow(&WorkflowScript { n, ops });
     }
 
     /// The byte decoders (the fuzz targets' entry points) accept anything.
     #[test]
     fn arbitrary_bytes_decode_and_run(bytes in prop::collection::vec(any::<u8>(), 0..256)) {
         run_core(&decode_core(&bytes));
-        run_session(&decode_session(&bytes));
+        run_workflow(&decode_workflow(&bytes));
     }
 }
 
@@ -98,15 +98,15 @@ fn happy_path_completes_for_any_reply_order() {
 
     for n in 0..6u8 {
         for reverse in [false, true] {
-            let mut session = model::FanOut::new(n as usize);
-            let first = session.advance().unwrap();
+            let mut workflow = model::FanOut::new(n as usize);
+            let first = workflow.advance().unwrap();
             if n == 0 {
                 assert_eq!(first, Step::Complete);
             } else {
                 assert_eq!(first, Step::AwaitHost);
             }
 
-            let mut ids: Vec<RequestId> = session
+            let mut ids: Vec<RequestId> = workflow
                 .outstanding_requests()
                 .iter()
                 .map(|r| r.id)
@@ -115,7 +115,7 @@ fn happy_path_completes_for_any_reply_order() {
                 ids.reverse();
             }
             for id in ids {
-                let reply = match session
+                let reply = match workflow
                     .outstanding_requests()
                     .iter()
                     .find(|r| r.id == id)
@@ -125,12 +125,12 @@ fn happy_path_completes_for_any_reply_order() {
                     Kind::A => Reply::A,
                     Kind::B => Reply::B,
                 };
-                session.fulfill(id, reply).unwrap();
+                workflow.fulfill(id, reply).unwrap();
             }
 
-            assert_eq!(session.advance().unwrap(), Step::Complete);
-            assert_eq!(session.advance().unwrap(), Step::Complete);
-            assert_eq!(session.finish().unwrap(), n as usize);
+            assert_eq!(workflow.advance().unwrap(), Step::Complete);
+            assert_eq!(workflow.advance().unwrap(), Step::Complete);
+            assert_eq!(workflow.finish().unwrap(), n as usize);
         }
     }
 }
@@ -156,16 +156,16 @@ fn seed_scripts() {
         Fulfill(Target::Issued(0), Reply::A),
     ]);
 
-    run_session(&SessionScript {
+    run_workflow(&WorkflowScript {
         n: 3,
         ops: vec![
-            SessionOp::Fulfill(Target::Issued(0), Reply::A),
-            SessionOp::Advance,
-            SessionOp::Fulfill(Target::Issued(1), Reply::Failed),
-            SessionOp::Fulfill(Target::Issued(1), Reply::Failed),
-            SessionOp::Advance,
-            SessionOp::Advance,
-            SessionOp::Fulfill(Target::Issued(2), Reply::A),
+            WorkflowOp::Fulfill(Target::Issued(0), Reply::A),
+            WorkflowOp::Advance,
+            WorkflowOp::Fulfill(Target::Issued(1), Reply::Failed),
+            WorkflowOp::Fulfill(Target::Issued(1), Reply::Failed),
+            WorkflowOp::Advance,
+            WorkflowOp::Advance,
+            WorkflowOp::Fulfill(Target::Issued(2), Reply::A),
         ],
     });
 }
@@ -179,7 +179,7 @@ fn fuzz_seeds_decode_to_their_named_scenarios() {
 
     let a = Target::Issued(0);
 
-    let seed = include_bytes!("corpus/session_core/issue-fulfill-finish");
+    let seed = include_bytes!("corpus/workflow_core/issue-fulfill-finish");
     let expected = vec![
         Issue(Kind::A),
         Fulfill(a, Reply::A),
@@ -189,7 +189,7 @@ fn fuzz_seeds_decode_to_their_named_scenarios() {
     assert_eq!(decode_core(seed), expected);
     run_core(&expected);
 
-    let seed = include_bytes!("corpus/session_core/mismatch-then-take");
+    let seed = include_bytes!("corpus/workflow_core/mismatch-then-take");
     let expected = vec![
         Issue(Kind::A),
         Fulfill(a, Reply::B),
@@ -200,32 +200,32 @@ fn fuzz_seeds_decode_to_their_named_scenarios() {
     assert_eq!(decode_core(seed), expected);
     run_core(&expected);
 
-    let seed = include_bytes!("corpus/fan_out_session/fan-out-3");
-    let expected = SessionScript {
+    let seed = include_bytes!("corpus/fan_out_workflow/fan-out-3");
+    let expected = WorkflowScript {
         n: 3,
         ops: vec![
-            SessionOp::Advance,
-            SessionOp::Fulfill(Target::Issued(0), Reply::A),
-            SessionOp::Fulfill(Target::Issued(1), Reply::B),
-            SessionOp::Fulfill(Target::Issued(2), Reply::A),
-            SessionOp::Advance,
-            SessionOp::Advance,
+            WorkflowOp::Advance,
+            WorkflowOp::Fulfill(Target::Issued(0), Reply::A),
+            WorkflowOp::Fulfill(Target::Issued(1), Reply::B),
+            WorkflowOp::Fulfill(Target::Issued(2), Reply::A),
+            WorkflowOp::Advance,
+            WorkflowOp::Advance,
         ],
     };
-    assert_eq!(decode_session(seed), expected);
-    run_session(&expected);
+    assert_eq!(decode_workflow(seed), expected);
+    run_workflow(&expected);
 
-    let seed = include_bytes!("corpus/fan_out_session/fail-then-advance");
-    let expected = SessionScript {
+    let seed = include_bytes!("corpus/fan_out_workflow/fail-then-advance");
+    let expected = WorkflowScript {
         n: 2,
         ops: vec![
-            SessionOp::Advance,
-            SessionOp::Fulfill(Target::Issued(0), Reply::Failed),
-            SessionOp::Advance,
-            SessionOp::Advance,
-            SessionOp::Fulfill(Target::Issued(1), Reply::B),
+            WorkflowOp::Advance,
+            WorkflowOp::Fulfill(Target::Issued(0), Reply::Failed),
+            WorkflowOp::Advance,
+            WorkflowOp::Advance,
+            WorkflowOp::Fulfill(Target::Issued(1), Reply::B),
         ],
     };
-    assert_eq!(decode_session(seed), expected);
-    run_session(&expected);
+    assert_eq!(decode_workflow(seed), expected);
+    run_workflow(&expected);
 }

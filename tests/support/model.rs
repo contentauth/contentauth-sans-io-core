@@ -11,12 +11,12 @@
 // specific language governing permissions and limitations under
 // each license.
 
-//! Model-based harnesses for the engine's session machinery, shared by the
+//! Model-based harnesses for the engine's workflow machinery, shared by the
 //! `proptest` suite (`tests/model_based.rs`) and the `cargo-fuzz` targets
 //! (`fuzz/`), which both `#[path]`-include this file.
 //!
 //! Each harness takes a *script* — a sequence of host operations, including
-//! deliberately illegal ones (unknown IDs, wrong payloads, driving a session
+//! deliberately illegal ones (unknown IDs, wrong payloads, driving a workflow
 //! past its terminal state) — runs it against the real engine, runs the same
 //! script against a deliberately naive reference model written from the
 //! documented contract, and asserts the two agree after every step. Any
@@ -27,7 +27,7 @@
 //!
 //! The model records the contract as the engine currently implements it;
 //! notably, the lifecycle is "last `mark_*` call wins", so a workflow that
-//! marks a session failed and then complete is not stopped by the engine.
+//! marks itself failed and then complete is not stopped by the engine.
 
 #![allow(dead_code, clippy::unwrap_used, clippy::panic)]
 
@@ -71,8 +71,8 @@ impl Request for Kind {
 
 /// `RequestId` is opaque, so a harness cannot forge one. This mints them
 /// from a throwaway core instead: the n-th ID it hands out is numerically
-/// the n-th ID any fresh session hands out, which is exactly what a host
-/// confusing two sessions' IDs would present.
+/// the n-th ID any fresh workflow hands out, which is exactly what a host
+/// confusing two workflows' IDs would present.
 pub struct Ids {
     mint: ManualWorkflowCore<Kind>,
     pool: Vec<RequestId>,
@@ -113,12 +113,12 @@ pub fn number(id: RequestId) -> u64 {
 /// How a script names a request ID.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Target {
-    /// The n-th ID the session has handed out so far (wrapping), or an
+    /// The n-th ID the workflow has handed out so far (wrapping), or an
     /// arbitrary one if none has been issued yet.
     Issued(u8),
 
     /// The ID with this number (modulo a small range) as some *other*
-    /// session minted it: unknown to this session unless it happens to have
+    /// workflow minted it: unknown to this workflow unless it happens to have
     /// issued that many.
     Raw(u64),
 }
@@ -252,7 +252,7 @@ pub fn run_core(ops: &[CoreOp]) {
         match *op {
             CoreOp::Issue(kind) => {
                 let id = core.issue(kind);
-                // IDs are session-unique and handed out in sequence.
+                // IDs are workflow-unique and handed out in sequence.
                 assert_eq!(id, ids.id(model.next));
                 model.outstanding.push((model.next, kind));
                 model.issued.push(model.next);
@@ -262,8 +262,8 @@ pub fn run_core(ops: &[CoreOp]) {
             CoreOp::Fulfill(target, reply) => {
                 let raw = model.resolve(target);
                 let expected = match model.life() {
-                    Life::Complete => Err(ProtocolError::SessionComplete),
-                    Life::Failed => Err(ProtocolError::SessionFailed(core_failure())),
+                    Life::Complete => Err(ProtocolError::WorkflowComplete),
+                    Life::Failed => Err(ProtocolError::WorkflowFailed(core_failure())),
                     Life::Running => match model.outstanding.iter().position(|(i, _)| *i == raw) {
                         None => Err(ProtocolError::UnknownRequest(ids.id(raw))),
                         Some(pos) if !model.outstanding[pos].1.accepts(&reply) => {
@@ -305,8 +305,8 @@ pub fn run_core(ops: &[CoreOp]) {
             CoreOp::FinishCheck => {
                 let expected = match model.life() {
                     Life::Complete => Ok(()),
-                    Life::Failed => Err(ProtocolError::SessionFailed(core_failure())),
-                    Life::Running => Err(ProtocolError::SessionNotComplete),
+                    Life::Failed => Err(ProtocolError::WorkflowFailed(core_failure())),
+                    Life::Running => Err(ProtocolError::WorkflowNotComplete),
                 };
                 assert_eq!(core.finish_check(), expected);
             }
@@ -349,7 +349,7 @@ pub enum FanError {
     HostFailed,
 }
 
-/// A minimal real session: the first `advance` issues `n` requests, and it
+/// A minimal real workflow: the first `advance` issues `n` requests, and it
 /// completes once every one is answered, or fails on the first `Failed`
 /// reply it consumes.
 pub struct FanOut {
@@ -442,38 +442,38 @@ impl Workflow for FanOut {
     }
 }
 
-/// One host call on a [`FanOut`] session.
+/// One host call on a [`FanOut`] workflow.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SessionOp {
+pub enum WorkflowOp {
     Advance,
     Fulfill(Target, Reply),
     Inspect,
 }
 
-/// A decoded session script: how many requests the session fans out to,
+/// A decoded workflow script: how many requests the workflow fans out to,
 /// and the host's calls.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SessionScript {
+pub struct WorkflowScript {
     pub n: u8,
-    pub ops: Vec<SessionOp>,
+    pub ops: Vec<WorkflowOp>,
 }
 
 /// Decodes arbitrary bytes into a script (the `cargo-fuzz` entry point).
-pub fn decode_session(bytes: &[u8]) -> SessionScript {
+pub fn decode_workflow(bytes: &[u8]) -> WorkflowScript {
     let mut cur = Cursor(bytes);
     let n = cur.byte() % 6;
     let mut ops = Vec::new();
     while !cur.is_empty() {
         ops.push(match cur.byte() % 4 {
-            0 => SessionOp::Advance,
+            0 => WorkflowOp::Advance,
             1 | 2 => {
                 let target = cur.target();
-                SessionOp::Fulfill(target, cur.reply())
+                WorkflowOp::Fulfill(target, cur.reply())
             }
-            _ => SessionOp::Inspect,
+            _ => WorkflowOp::Inspect,
         });
     }
-    SessionScript { n, ops }
+    WorkflowScript { n, ops }
 }
 
 /// Reference model of [`FanOut`], derived from the [`Workflow`] contract
@@ -514,10 +514,10 @@ impl FanModel {
 
 /// Drives a [`FanOut`] through `script` as a (possibly hostile) host,
 /// checking every result against the model, then finishes it.
-pub fn run_session(script: &SessionScript) {
+pub fn run_workflow(script: &WorkflowScript) {
     let n = script.n as usize % 6;
     let mut ids = Ids::new();
-    let mut session = FanOut::new(n);
+    let mut workflow = FanOut::new(n);
     let mut model = FanModel {
         n,
         issued: None,
@@ -527,9 +527,9 @@ pub fn run_session(script: &SessionScript) {
 
     for op in &script.ops {
         match *op {
-            SessionOp::Advance => {
+            WorkflowOp::Advance => {
                 let expected = match model.life {
-                    Life::Failed => Err(FanError::Protocol(ProtocolError::SessionFailed(
+                    Life::Failed => Err(FanError::Protocol(ProtocolError::WorkflowFailed(
                         fan_failure(),
                     ))),
                     Life::Complete => Ok(Step::Complete),
@@ -552,14 +552,14 @@ pub fn run_session(script: &SessionScript) {
                         }
                     }
                 };
-                assert_eq!(session.advance(), expected);
+                assert_eq!(workflow.advance(), expected);
             }
 
-            SessionOp::Fulfill(target, reply) => {
+            WorkflowOp::Fulfill(target, reply) => {
                 let raw = model.resolve(target);
                 let expected = match model.life {
-                    Life::Complete => Err(ProtocolError::SessionComplete),
-                    Life::Failed => Err(ProtocolError::SessionFailed(fan_failure())),
+                    Life::Complete => Err(ProtocolError::WorkflowComplete),
+                    Life::Failed => Err(ProtocolError::WorkflowFailed(fan_failure())),
                     Life::Running if !model.outstanding().contains(&raw) => {
                         Err(ProtocolError::UnknownRequest(ids.id(raw)))
                     }
@@ -575,31 +575,31 @@ pub fn run_session(script: &SessionScript) {
                     }
                 };
                 assert_eq!(
-                    session.fulfill(ids.id(raw), reply),
+                    workflow.fulfill(ids.id(raw), reply),
                     expected.map_err(FanError::from)
                 );
             }
 
-            SessionOp::Inspect => {}
+            WorkflowOp::Inspect => {}
         }
 
-        let seen: Vec<u64> = session
+        let seen: Vec<u64> = workflow
             .outstanding_requests()
             .iter()
             .map(|r| number(r.id))
             .collect();
         assert_eq!(seen, model.outstanding(), "outstanding set diverged");
-        for request in session.outstanding_requests() {
+        for request in workflow.outstanding_requests() {
             assert_eq!(request.kind, FanModel::kind(number(request.id)));
         }
     }
 
     let expected = match model.life {
         Life::Complete => Ok(n),
-        Life::Failed => Err(FanError::Protocol(ProtocolError::SessionFailed(
+        Life::Failed => Err(FanError::Protocol(ProtocolError::WorkflowFailed(
             fan_failure(),
         ))),
-        Life::Running => Err(FanError::Protocol(ProtocolError::SessionNotComplete)),
+        Life::Running => Err(FanError::Protocol(ProtocolError::WorkflowNotComplete)),
     };
-    assert_eq!(session.finish(), expected);
+    assert_eq!(workflow.finish(), expected);
 }

@@ -23,37 +23,42 @@
 //! crates, not a general-purpose workflow framework. The core contains no
 //! domain-specific validation or signing logic.
 //!
+//! Prefer [`CoroutineWorkflow`] for most workflows: write an `async fn` that
+//! requests operations through [`Host`] and awaits the replies, and let the
+//! compiler generate the state machine. The host still uses the synchronous
+//! [`Workflow`] interface; no async runtime is required. Use
+//! [`ManualWorkflowCore`] when you need an explicit, inspectable state machine.
+//!
 //! Concretely, this crate provides:
 //!
-//! * [`Request`] — the trait a session's own request vocabulary implements,
+//! * [`Request`] — the trait a workflow's own request vocabulary implements,
 //!   relating each request kind to the reply that answers it.
 //! * [`HostRequest`] and [`RequestId`] — the request envelope and its
 //!   correlation ID.
-//! * [`RequestTracker`] — bookkeeping for requests a session has issued but
+//! * [`RequestTracker`] — bookkeeping for requests a workflow has issued but
 //!   its host has not yet fulfilled.
 //! * [`ProtocolError`] — the host-binding-is-buggy error vocabulary common
-//!   to every session (an unknown request ID, a mismatched reply, driving a
-//!   session past a terminal state).
+//!   to every workflow (an unknown request ID, a mismatched reply, driving a
+//!   workflow past a terminal state).
 //! * [`Step`] and [`Workflow`] — the `advance` / `outstanding_requests` /
 //!   `fulfill` / `finish` interaction contract itself, as a trait so
-//!   host-side code can be written once against any session built here.
-//! * [`ManualWorkflowCore`] — a struct a concrete session embeds to get request
-//!   tracking and terminal-state bookkeeping for free, leaving only its own
-//!   workflow logic to write.
-//! * [`CoroutineWorkflow`], [`Host`], and [`PendingReply`] — the alternative to
-//!   [`ManualWorkflowCore`]: write the workflow as an `async fn` that awaits its
-//!   host's replies, and let the compiler generate the state machine. No
-//!   async runtime is involved, and the host sees the same [`Workflow`]
-//!   contract either way.
+//!   host-side code can be written once against any workflow built here.
+//! * [`CoroutineWorkflow`], [`Host`], and [`PendingReply`] — the preferred way
+//!   to implement a workflow: write an `async fn` that awaits its host's
+//!   replies, and let the compiler generate the state machine. No async
+//!   runtime is involved.
+//! * [`ManualWorkflowCore`] — the alternative for a hand-written state
+//!   machine: request tracking and terminal-state bookkeeping, leaving its
+//!   explicit phases and transitions to the workflow author.
 //! * [`Nested`] — a [`Workflow`] driven from inside a [`CoroutineWorkflow`], so a
-//!   session that composes others can answer their requests itself or
+//!   workflow that composes others can answer their requests itself or
 //!   forward them to its own host from a plain `async` loop.
 //!
 //! A concrete workflow — reading and validating a C2PA manifest store or
 //! generating and signing one — lives in its own crate built on top of
 //! this one, with its own request vocabulary, settings, and result type.
-//! See [`ManualWorkflowCore`] for a complete (if trivial) example of
-//! assembling one.
+//! See [`CoroutineWorkflow`] for a complete example of the preferred style,
+//! or [`ManualWorkflowCore`] for a hand-written state machine.
 
 #![deny(clippy::expect_used)]
 #![deny(clippy::panic)]
@@ -67,7 +72,7 @@ mod nested;
 mod recorder;
 mod request;
 #[cfg(test)]
-mod test_session;
+mod test_workflow;
 mod tracker;
 mod types;
 mod workflow;

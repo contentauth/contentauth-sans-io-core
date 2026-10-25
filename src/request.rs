@@ -11,16 +11,16 @@
 // specific language governing permissions and limitations under
 // each license.
 
-//! The request/reply relationship a concrete session's vocabulary must
+//! The request/reply relationship a concrete workflow's vocabulary must
 //! implement.
 
 use std::fmt;
 
 use crate::types::RequestId;
 
-/// One kind of operation a session may ask its host to perform.
+/// One kind of operation a workflow may ask its host to perform.
 ///
-/// A concrete state machine (a read session, a sign session, or any other
+/// A concrete state machine (a read workflow, a sign workflow, or any other
 /// subcomponent built on this engine) defines its own request vocabulary —
 /// typically an enum with one variant per operation — and implements this
 /// trait on it so the engine's [`RequestTracker`](crate::RequestTracker) can
@@ -43,7 +43,7 @@ pub trait Request: fmt::Debug {
     fn accepts(&self, reply: &Self::Reply) -> bool;
 }
 
-/// One operation a session's core needs its host to perform, paired with the
+/// One operation a workflow's core needs its host to perform, paired with the
 /// ID the host must echo back when reporting the outcome.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[non_exhaustive]

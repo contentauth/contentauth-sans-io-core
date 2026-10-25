@@ -22,13 +22,13 @@ thiserror = "2.0.20"
 [[bin]]
 bench = false
 doc = false
-name = "session_core"
-path = "fuzz_targets/session_core.rs"
+name = "workflow_core"
+path = "fuzz_targets/workflow_core.rs"
 test = false
 
 [[bin]]
 bench = false
 doc = false
-name = "fan_out_session"
-path = "fuzz_targets/fan_out_session.rs"
+name = "fan_out_workflow"
+path = "fuzz_targets/fan_out_workflow.rs"
 test = false

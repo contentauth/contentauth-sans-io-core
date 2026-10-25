@@ -19,7 +19,7 @@ all-features = true
 
 [features]
 # Exposes `RequestTracker::fulfill_unchecked` outside this crate, for
-# downstream sessions' own tests that need to exercise a state machine's
+# downstream workflows' own tests that need to exercise a state machine's
 # defense-in-depth check against a reply payload `fulfill` itself would
 # reject.
 test-util = []

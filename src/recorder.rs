@@ -11,14 +11,14 @@
 // specific language governing permissions and limitations under
 // each license.
 
-//! Recording a session's conversation with its host, and replaying it.
+//! Recording a workflow's conversation with its host, and replaying it.
 //!
-//! A session never performs I/O: everything it learns about the outside
+//! A workflow never performs I/O: everything it learns about the outside
 //! world — asset bytes, the clock, the network, signatures — arrives as a
 //! reply to a request. So the sequence of calls a host made, and the replies
-//! it gave, is *all* a session's behavior depends on. Record that sequence
-//! once (a [`Transcript`]) and the session's run can be printed for a human
-//! to read, or [`replay`]ed against a fresh session — on another machine,
+//! it gave, is *all* a workflow's behavior depends on. Record that sequence
+//! once (a [`Transcript`]) and the workflow's run can be printed for a human
+//! to read, or [`replay`]ed against a fresh workflow — on another machine,
 //! under a debugger, after a fix — and it will do exactly the same thing,
 //! or [`replay`] reports the first place it did not.
 
@@ -31,7 +31,7 @@ use crate::{HostRequest, Request, RequestId, Step, Workflow};
 ///
 /// Errors are kept as their [`Display`](fmt::Display) text: what matters for
 /// diagnosing and replaying a run is what was reported, and recording the
-/// text keeps [`Transcript`] free of any bound on a session's error type.
+/// text keeps [`Transcript`] free of any bound on a workflow's error type.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Outcome<T> {
     /// The call succeeded with this value.
@@ -53,7 +53,7 @@ impl<T> Outcome<T> {
     }
 }
 
-/// One call a host made on a recorded session.
+/// One call a host made on a recorded workflow.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Event<Req: Request> {
@@ -65,7 +65,7 @@ pub enum Event<Req: Request> {
         /// What the call returned.
         outcome: Outcome<Step>,
 
-        /// Requests the session issued during the call, in the order
+        /// Requests the workflow issued during the call, in the order
         /// [`Workflow::outstanding_requests`] lists them.
         issued: Vec<HostRequest<Req>>,
     },
@@ -78,12 +78,12 @@ pub enum Event<Req: Request> {
         /// The reply the host gave.
         reply: Req::Reply,
 
-        /// Whether the session accepted it.
+        /// Whether the workflow accepted it.
         outcome: Outcome<()>,
     },
 }
 
-/// Every call a host made on a [`Recorder`]'s session, in order — enough to
+/// Every call a host made on a [`Recorder`]'s workflow, in order — enough to
 /// read back what happened, or to [`replay`] it.
 ///
 /// Holds every reply in full, asset bytes included, so it grows with the
@@ -234,34 +234,34 @@ impl<Req: Request> fmt::Display for Transcript<Req> {
     }
 }
 
-/// Wraps a session, recording every call its host makes into a
+/// Wraps a workflow, recording every call its host makes into a
 /// [`Transcript`]. Is itself a [`Workflow`], so a host drives it exactly as it
-/// would the session inside — recording is a one-line change to a host.
+/// would the workflow inside — recording is a one-line change to a host.
 pub struct Recorder<S: Workflow> {
-    session: S,
+    workflow: S,
     transcript: Transcript<S::Request>,
     seen: HashSet<RequestId>,
 }
 
 impl<S: Workflow> Recorder<S> {
-    /// Starts recording `session`.
-    pub fn new(session: S) -> Self {
+    /// Starts recording the supplied workflow.
+    pub fn new(workflow: S) -> Self {
         Self {
-            session,
+            workflow,
             transcript: Transcript::default(),
             seen: HashSet::new(),
         }
     }
 
     /// Everything recorded so far — available at any point, including after
-    /// the session has failed.
+    /// the workflow has failed.
     pub fn transcript(&self) -> &Transcript<S::Request> {
         &self.transcript
     }
 
-    /// The session and its transcript, separately.
+    /// The workflow and its transcript, separately.
     pub fn into_parts(self) -> (S, Transcript<S::Request>) {
-        (self.session, self.transcript)
+        (self.workflow, self.transcript)
     }
 }
 
@@ -277,10 +277,10 @@ where
     type Request = S::Request;
 
     fn advance(&mut self) -> Result<Step, S::Error> {
-        let phase = self.session.phase();
-        let result = self.session.advance();
+        let phase = self.workflow.phase();
+        let result = self.workflow.advance();
         let issued = self
-            .session
+            .workflow
             .outstanding_requests()
             .iter()
             .filter(|request| self.seen.insert(request.id))
@@ -295,7 +295,7 @@ where
     }
 
     fn outstanding_requests(&self) -> &[HostRequest<S::Request>] {
-        self.session.outstanding_requests()
+        self.workflow.outstanding_requests()
     }
 
     fn fulfill(
@@ -304,7 +304,7 @@ where
         reply: <S::Request as Request>::Reply,
     ) -> Result<(), S::Error> {
         let copy = reply.clone();
-        let result = self.session.fulfill(id, reply);
+        let result = self.workflow.fulfill(id, reply);
         self.transcript.events.push(Event::Fulfilled {
             id,
             reply: copy,
@@ -314,11 +314,11 @@ where
     }
 
     fn phase(&self) -> String {
-        self.session.phase()
+        self.workflow.phase()
     }
 
     fn finish(self) -> Result<S::Output, S::Error> {
-        self.session.finish()
+        self.workflow.finish()
     }
 }
 
@@ -351,17 +351,17 @@ impl fmt::Display for Divergence {
 
 impl std::error::Error for Divergence {}
 
-/// Drives `session` — freshly constructed, the same way as the one that was
+/// Drives a workflow — freshly constructed, the same way as the one that was
 /// recorded — through the calls in `transcript`, checking at each that it
-/// does what the recorded session did: returns the same step or error, and
+/// does what the recorded workflow did: returns the same step or error, and
 /// issues the same requests (compared by their [`Debug`](fmt::Debug) text).
 ///
-/// Returns the session as the transcript leaves it, so a caller can go on
+/// Returns the workflow as the transcript leaves it, so a caller can go on
 /// to inspect it, keep driving it, or [`Workflow::finish`] it; or the first
-/// [`Divergence`]. Since a session's every input arrives as a reply, a
+/// [`Divergence`]. Since a workflow's every input arrives as a reply, a
 /// faithful replay reproduces a failure exactly — under a debugger, with
 /// added logging, or against a fix that should now behave differently.
-pub fn replay<S>(mut session: S, transcript: &Transcript<S::Request>) -> Result<S, Divergence>
+pub fn replay<S>(mut workflow: S, transcript: &Transcript<S::Request>) -> Result<S, Divergence>
 where
     S: Workflow,
     <S::Request as Request>::Reply: Clone,
@@ -369,7 +369,7 @@ where
 {
     let mut seen = HashSet::new();
     for (index, event) in transcript.events.iter().enumerate() {
-        let phase = session.phase();
+        let phase = workflow.phase();
         let diverged = |expected: String, actual: String| Divergence {
             event: index,
             phase: phase.clone(),
@@ -380,14 +380,14 @@ where
             Event::Advanced {
                 outcome, issued, ..
             } => {
-                let actual = Outcome::of(&session.advance());
+                let actual = Outcome::of(&workflow.advance());
                 if actual != *outcome {
                     return Err(diverged(
                         format!("advance -> {outcome:?}"),
                         format!("advance -> {actual:?}"),
                     ));
                 }
-                let fresh: Vec<_> = session
+                let fresh: Vec<_> = workflow
                     .outstanding_requests()
                     .iter()
                     .filter(|request| seen.insert(request.id))
@@ -405,7 +405,7 @@ where
                 }
             }
             Event::Fulfilled { id, reply, outcome } => {
-                let actual = Outcome::of(&session.fulfill(*id, reply.clone()));
+                let actual = Outcome::of(&workflow.fulfill(*id, reply.clone()));
                 if actual != *outcome {
                     return Err(diverged(
                         format!("fulfill {id:?} -> {outcome:?}"),
@@ -415,7 +415,7 @@ where
             }
         }
     }
-    Ok(session)
+    Ok(workflow)
 }
 
 #[cfg(test)]
@@ -425,22 +425,22 @@ mod tests {
 
     use super::*;
     use crate::{
-        test_session::{Ping, PingSession, Pong},
+        test_workflow::{Ping, PingWorkflow, Pong},
         ProtocolError,
     };
 
-    /// Drives `session` to the end, answering every ping with `answer`,
+    /// Drives the workflow to the end, answering every ping with `answer`,
     /// and returns how it ended.
     fn drive<S: Workflow<Request = Ping>>(
-        session: &mut S,
+        workflow: &mut S,
         answer: impl Fn(&Ping) -> Pong,
     ) -> Result<Step, S::Error> {
         loop {
-            if session.advance()? == Step::Complete {
+            if workflow.advance()? == Step::Complete {
                 return Ok(Step::Complete);
             }
-            for request in session.outstanding_requests().to_vec() {
-                session.fulfill(request.id, answer(&request.kind))?;
+            for request in workflow.outstanding_requests().to_vec() {
+                workflow.fulfill(request.id, answer(&request.kind))?;
             }
         }
     }
@@ -454,7 +454,7 @@ mod tests {
 
     #[test]
     fn a_recorder_is_transparent_to_its_host() {
-        let mut recorder = Recorder::new(PingSession::new(2));
+        let mut recorder = Recorder::new(PingWorkflow::new(2));
         assert_eq!(recorder.phase(), "Start");
         assert_eq!(drive(&mut recorder, |_| Pong::Ok).unwrap(), Step::Complete);
         assert_eq!(recorder.phase(), "Complete");
@@ -462,20 +462,20 @@ mod tests {
     }
 
     #[test]
-    fn a_session_waits_for_partial_replies_and_handles_an_empty_batch() {
-        let mut session = PingSession::new(2);
-        assert_eq!(session.advance().unwrap(), Step::AwaitHost);
-        let requests = session.outstanding_requests();
+    fn a_workflow_waits_for_partial_replies_and_handles_an_empty_batch() {
+        let mut workflow = PingWorkflow::new(2);
+        assert_eq!(workflow.advance().unwrap(), Step::AwaitHost);
+        let requests = workflow.outstanding_requests();
         let first = requests[0].id;
         let second = requests[1].id;
 
-        session.fulfill(first, Pong::Ok).unwrap();
-        assert_eq!(session.advance().unwrap(), Step::AwaitHost);
-        assert_eq!(session.outstanding_requests()[0].id, second);
-        session.fulfill(second, Pong::Ok).unwrap();
-        assert_eq!(session.advance().unwrap(), Step::Complete);
+        workflow.fulfill(first, Pong::Ok).unwrap();
+        assert_eq!(workflow.advance().unwrap(), Step::AwaitHost);
+        assert_eq!(workflow.outstanding_requests()[0].id, second);
+        workflow.fulfill(second, Pong::Ok).unwrap();
+        assert_eq!(workflow.advance().unwrap(), Step::Complete);
 
-        let mut empty = PingSession::new(0);
+        let mut empty = PingWorkflow::new(0);
         assert_eq!(empty.advance().unwrap(), Step::AwaitHost);
         assert!(empty.outstanding_requests().is_empty());
         assert_eq!(empty.advance().unwrap(), Step::Complete);
@@ -483,7 +483,7 @@ mod tests {
 
     #[test]
     fn a_transcript_records_every_call_and_reads_as_a_log() {
-        let mut recorder = Recorder::new(PingSession::new(2));
+        let mut recorder = Recorder::new(PingWorkflow::new(2));
         let err = drive(&mut recorder, fails_second_ping).unwrap_err();
         assert_eq!(err.to_string(), "no pong: timed out");
 
@@ -514,7 +514,7 @@ mod tests {
 
     #[test]
     fn a_rejected_reply_is_recorded_as_such() {
-        let mut recorder = Recorder::new(PingSession::new(1));
+        let mut recorder = Recorder::new(PingWorkflow::new(1));
         recorder.advance().unwrap();
         let id = recorder.outstanding_requests()[0].id;
         assert!(recorder.fulfill(id, Pong::Unrelated).is_err());
@@ -659,37 +659,37 @@ mod tests {
 
     #[test]
     fn replaying_a_failure_reproduces_it_exactly() {
-        let mut recorder = Recorder::new(PingSession::new(2));
+        let mut recorder = Recorder::new(PingWorkflow::new(2));
         drive(&mut recorder, fails_second_ping).unwrap_err();
         let (_, transcript) = recorder.into_parts();
 
-        let replayed = replay(PingSession::new(2), &transcript).unwrap();
+        let replayed = replay(PingWorkflow::new(2), &transcript).unwrap();
         assert_eq!(replayed.phase(), "AwaitingPong");
         assert!(matches!(
             replayed.finish(),
-            Err(crate::test_session::PingError::Protocol(
-                ProtocolError::SessionFailed(_)
+            Err(crate::test_workflow::PingError::Protocol(
+                ProtocolError::WorkflowFailed(_)
             ))
         ));
     }
 
     #[test]
-    fn replaying_a_success_leaves_a_session_ready_to_finish() {
-        let mut recorder = Recorder::new(PingSession::new(3));
+    fn replaying_a_success_leaves_a_workflow_ready_to_finish() {
+        let mut recorder = Recorder::new(PingWorkflow::new(3));
         drive(&mut recorder, |_| Pong::Ok).unwrap();
         let (_, transcript) = recorder.into_parts();
 
-        let replayed = replay(PingSession::new(3), &transcript).unwrap();
+        let replayed = replay(PingWorkflow::new(3), &transcript).unwrap();
         assert_eq!(replayed.finish().unwrap(), 3);
     }
 
     #[test]
     fn a_replay_that_issues_different_requests_diverges() {
-        let mut recorder = Recorder::new(PingSession::new(2));
+        let mut recorder = Recorder::new(PingWorkflow::new(2));
         drive(&mut recorder, |_| Pong::Ok).unwrap();
         let (_, transcript) = recorder.into_parts();
 
-        let divergence = replay(PingSession::new(1), &transcript).unwrap_err();
+        let divergence = replay(PingWorkflow::new(1), &transcript).unwrap_err();
         assert_eq!(divergence.event, 0);
         assert_eq!(divergence.phase, "Start");
         assert!(divergence.expected.contains("Ping(1)"), "{divergence}");
@@ -701,12 +701,12 @@ mod tests {
 
     #[test]
     fn a_replay_whose_step_differs_diverges() {
-        let mut recorder = Recorder::new(PingSession::new(1));
+        let mut recorder = Recorder::new(PingWorkflow::new(1));
         drive(&mut recorder, fails_second_ping).unwrap();
         let (_, transcript) = recorder.into_parts();
 
         // Completed where the recording was still waiting.
-        let mut ahead = PingSession::new(1);
+        let mut ahead = PingWorkflow::new(1);
         drive(&mut ahead, |_| Pong::Ok).unwrap();
         let divergence = replay(ahead, &transcript).unwrap_err();
         assert_eq!(divergence.event, 0);
@@ -716,14 +716,14 @@ mod tests {
 
     #[test]
     fn a_replay_whose_fulfill_differs_diverges() {
-        let mut recorder = Recorder::new(PingSession::new(1));
+        let mut recorder = Recorder::new(PingWorkflow::new(1));
         recorder.advance().unwrap();
         let id = recorder.outstanding_requests()[0].id;
         recorder.fulfill(id, Pong::Ok).unwrap();
         let (_, transcript) = recorder.into_parts();
 
-        // A session that has already failed rejects every reply.
-        let mut failed = PingSession::new(1);
+        // A workflow that has already failed rejects every reply.
+        let mut failed = PingWorkflow::new(1);
         failed.advance().unwrap();
         let first = failed.outstanding_requests()[0].id;
         failed.fulfill(first, Pong::Failed("x")).unwrap();
@@ -735,6 +735,9 @@ mod tests {
         let divergence = replay(failed, &transcript).unwrap_err();
         assert_eq!(divergence.event, 0);
         assert!(divergence.expected.ends_with("Ok(())"), "{divergence}");
-        assert!(divergence.actual.contains("session failed"), "{divergence}");
+        assert!(
+            divergence.actual.contains("workflow failed"),
+            "{divergence}"
+        );
     }
 }

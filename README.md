@@ -33,18 +33,26 @@ Add the crate to your project:
 contentauth-sans-io-core = "0.1"
 ```
 
-Implement `Request` for your operation vocabulary, then implement `Workflow`
-using `ManualWorkflowCore` or wrap a `CoroutineWorkflow`. See the
-[API documentation](https://docs.rs/contentauth-sans-io-core) for complete
-examples of both approaches.
+Implement `Request` for your operation vocabulary, write your workflow as an
+`async fn` that asks its `Host` for replies, and pass it to
+`CoroutineWorkflow::new`. This is the preferred approach for most workflows:
+the compiler manages the state machine, and the host still drives it through
+the synchronous `Workflow` interface without an async runtime.
+
+Use `ManualWorkflowCore` instead when you need an explicit, inspectable state
+machine. See the [API documentation](https://docs.rs/contentauth-sans-io-core)
+for complete examples of both approaches.
 
 ## Interaction contract
 
-A session never blocks: when it cannot make further progress on its own, it
-parks itself and reports the operations it needs its host to perform. The
-host services them — concurrently and in any order, if it likes — and
-reports each outcome back. Calling `advance` again lets the session consume
-whatever outcomes have arrived and make further progress.
+When a workflow cannot make further progress without a host operation, it
+yields control and reports the operations it needs its host to perform. In
+the coroutine style, an `.await` may suspend the workflow, but `advance`
+returns `Step::AwaitHost` rather than blocking the host's thread waiting for
+a reply. The host remains free to do other work, service those operations —
+concurrently and in any order, if it likes — and report each outcome back.
+Calling `advance` again lets the workflow consume whatever outcomes have
+arrived and make further progress.
 
 ```text
              ┌────────────────────────────────────────────────┐
@@ -60,35 +68,36 @@ whatever outcomes have arrived and make further progress.
              └────────────────────────────────────────────────┘
 ```
 
-1. Create the session.
-2. Call `advance`. It returns `Step::AwaitHost` when blocked on the host, or
+1. Create the workflow.
+2. Call `advance`. It returns `Step::AwaitHost` when waiting on the host, or
    `Step::Complete` once the workflow has finished.
 3. While `AwaitHost`: service any subset of `outstanding_requests` and
    report each outcome via `fulfill`, then call `advance` again. Outcomes
    may be reported in any order.
-4. On `Complete`: consume the session with `finish` to obtain its result.
+4. On `Complete`: consume the workflow with `finish` to obtain its result.
 
 ### Threading
 
-A session is **not re-entrant**. `CoroutineWorkflow` uses internal synchronization
+A workflow is **not re-entrant**. `CoroutineWorkflow` uses internal synchronization
 for the mailbox shared with its future; ordinary serialized host calls do
-not contend on that lock. This does not lock the session's API or make
+not contend on that lock. This does not lock the workflow's API or make
 concurrent calls safe. Any host that employs a thread model must ensure
-the session's methods are never called simultaneously from multiple threads (nor
-re-entered from within a call in progress on the same session). Crashes or
+the workflow's methods are never called simultaneously from multiple threads (nor
+re-entered from within a call in progress on the same workflow). Crashes or
 unpredictable behavior are likely if this constraint is violated. Calls on
-*different* sessions may safely run at the same time; only calls on the
-*same* session must not. A session may also move to another thread between
+*different* workflows may safely run at the same time; only calls on the
+*same* workflow must not. A workflow may also move to another thread between
 calls. In safe Rust the
 borrow checker does much of this for you (`advance` and `fulfill` take
-`&mut self`, `finish` takes `self`), but hosts that share a session through
+`&mut self`, `finish` takes `self`), but hosts that share a workflow through
 interior mutability or reach it through a raw-handle binding must enforce
 it themselves.
 
-See the `Workflow` trait and `ManualWorkflowCore` in [`src/workflow.rs`](src/workflow.rs)
-for the concrete API.
+See the `Workflow` trait in [`src/workflow.rs`](src/workflow.rs) for the
+interaction contract and `CoroutineWorkflow` in
+[`src/coroutine.rs`](src/coroutine.rs) for the recommended implementation.
 
-## Two ways to implement a workflow
+## Implementing a workflow
 
 `Workflow` is the common host-facing contract, not an implementation style.
 Both styles below expose the same synchronous `advance` / `fulfill` /
@@ -96,27 +105,20 @@ Both styles below expose the same synchronous `advance` / `fulfill` /
 particular runtime. Concrete domain workflows implement this trait in
 their own crates.
 
-* **Explicit state machine, with `ManualWorkflowCore`** ([`src/workflow.rs`](src/workflow.rs)). The
-  workflow keeps a phase enum with one variant per point where it waits on
-  its host, each carrying every local that must survive the wait, and
-  `advance` matches on it. Every state is explicit and inspectable — and
-  every new wait costs a variant, a handler, and the same
-  `None` / `Failed` / wrong-reply arms again.
-* **Coroutine-style `async fn`, with `CoroutineWorkflow`** ([`src/coroutine.rs`](src/coroutine.rs)).
-  The workflow asks its `Host` handle for what it needs and `.await`s the
-  reply; the compiler generates the state machine, including the locals,
-  loops, `?` early returns and sub-workflow calls a hand-written one would
-  have to encode. `advance` polls the future once with a no-op waker —
-  there is no executor, runtime, or background thread. `fulfill` notifies
-  the reply's registered waker so collections such as `FuturesUnordered`
-  and `join_all` know which children are ready, but only `advance` polls
-  the workflow.
-  Issuing several requests before awaiting any puts them in front of the
-  host at once.
+### Recommended: coroutine-style `async fn`
 
-The distinction is how library logic is authored, not synchronous versus
-asynchronous execution by the host. Both implementations are state
-machines; the coroutine style lets Rust's compiler generate one.
+Prefer `CoroutineWorkflow` ([`src/coroutine.rs`](src/coroutine.rs)) for most
+workflows. The workflow asks its `Host` handle for what it needs and `.await`s
+the reply; the compiler generates the state machine, including the locals,
+loops, `?` early returns and sub-workflow calls a hand-written one would
+have to encode. This avoids maintaining explicit transitions and repeated
+reply-handling code as the workflow grows.
+
+`advance` polls the future once with a no-op waker — there is no executor,
+runtime, or background thread. `fulfill` notifies the reply's registered
+waker so collections such as `FuturesUnordered` and `join_all` know which
+children are ready, but only `advance` polls the workflow. Issuing several
+requests before awaiting any puts them in front of the host at once.
 
 The compiler's state is opaque, but a workflow names its current stage
 with `Host::set_phase`, exposed through `Workflow::phase` and preserved in
@@ -135,12 +137,25 @@ Hosts should stop servicing those requests and discard late results;
 operations already performed are not undone. Dropping one `PendingReply`
 while the workflow is still running does not cancel its request.
 
-## Composing sessions
+### Alternative: explicit state machine
+
+Use `ManualWorkflowCore` ([`src/workflow.rs`](src/workflow.rs)) when you need
+explicit, inspectable state. The workflow keeps a phase enum with one variant
+per point where it waits on its host, each carrying every local that must
+survive the wait, and `advance` matches on it. The helper handles request
+tracking and lifecycle bookkeeping, but you write the transitions and
+reply-handling paths yourself.
+
+The distinction is how library logic is authored, not synchronous versus
+asynchronous execution by the host. Both implementations are state
+machines; the preferred coroutine style lets Rust's compiler generate one.
+
+## Composing workflows
 
 [`Nested`](src/nested.rs) drives any `Workflow` from a `CoroutineWorkflow`'s async
-function, including hand-written sessions and other workflows. Repeatedly
-await `nested.next()` to obtain an inner request, then either answer it
-with `nested.fulfill(id, reply)` or forward it using
+function, including hand-written state machines and other coroutine
+workflows. Repeatedly await `nested.next()` to obtain an inner request,
+then either answer it with `nested.fulfill(id, reply)` or forward it using
 `nested.forward(id, host.request(outer_request), map_reply)`. Once `next`
 returns `None`, `nested.finish()` returns the inner result.
 
@@ -154,41 +169,41 @@ the engine. An unanswered inner request that cannot make progress produces
 The inner request vocabulary must implement `Clone`; forwarding's reply
 mapper is a function pointer (a function or non-capturing closure).
 
-## Debugging a session
+## Debugging a workflow
 
 A state machine that stops with an error can be hard to diagnose: by the
-time the host sees the error, the session has moved on (or poisoned
+time the host sees the error, the workflow has moved on (or poisoned
 itself), and the call stack that produced it is gone. Two things answer
 "where did it go wrong, and why?":
 
 * **Where it is, and where it failed.** `Workflow::phase` describes the
-  session's current phase in words — `"Locating > Scanning > Marker at
-  byte 2"`, `"Building > AwaitingSignature"` — with a session nested inside
-  another named after the outer phase. A failed session keeps reporting the
+  workflow's current phase in words — `"Locating > Scanning > Marker at
+  byte 2"`, `"Building > AwaitingSignature"` — with a workflow nested inside
+  another named after the outer phase. A failed workflow keeps reporting the
   phase it failed in, and every later call returns
-  `ProtocolError::SessionFailed(Failure)`, which carries that phase and the
-  original error's text rather than a bare "failed earlier". A session
-  implementation records both with `ManualWorkflowCore::mark_failed(phase, &err)`
-  on every error exit; `CoroutineWorkflow` does this automatically using the most
-  recent `Host::set_phase` (initially `"Start"`). Only the first failure
-  is kept. Phase wording is
-  for people and logs, not a stable interface: don't branch on it.
-* **What the host said to it.** Since a session performs no I/O, its
-  behavior depends on nothing but the replies it is given. Wrap a session
+  `ProtocolError::WorkflowFailed(Failure)`, which carries that phase and the
+  original error's text rather than a bare "failed earlier".
+  `CoroutineWorkflow` records both automatically using the most recent
+  `Host::set_phase` (initially `"Start"`). A hand-written workflow calls
+  `ManualWorkflowCore::mark_failed(phase, &err)` on every error exit instead.
+  Only the first failure is kept. Phase wording is for people and logs, not
+  a stable interface: don't branch on it.
+* **What the host said to it.** Since a workflow performs no I/O, its
+  behavior depends on nothing but the replies it is given. Wrap a workflow
   in a `Recorder` — itself a `Workflow`, so the host does not change — and
   it keeps a `Transcript` of every `advance` (the phase, what it returned,
   the requests it issued) and every `fulfill` (the reply, and whether it
   was accepted). A transcript prints as a readable one-line-per-call log,
-  and `replay` drives a fresh session through it, reproducing the run
+  and `replay` drives a fresh workflow through it, reproducing the run
   exactly — on another machine, under a debugger, or against a fix — or
-  reporting the first call where the session behaved differently
+  reporting the first call where the workflow behaved differently
   (`Divergence`). A transcript holds every reply in full, asset bytes
   included, so record only where its size and contents are acceptable.
 
 Wrap your concrete workflow with `Recorder::new(workflow)`, drive it as
-usual, and inspect `session.transcript()` when diagnosing a failure.
+usual, and inspect `workflow.transcript()` when diagnosing a failure.
 
-Synchronous hosts can use `session.respond(|request| answer(request))?`
+Synchronous hosts can use `workflow.respond(|request| answer(request))?`
 after each `AwaitHost`. This borrows each request, obtains its owned reply,
 and calls `fulfill` before servicing the next request: no request clones
 or intermediate reply batch are needed. It stops on the first protocol
@@ -226,7 +241,7 @@ taplo fmt --check
 
 ## Testing and fuzzing
 
-The engine's bookkeeping is the one piece every session shares, so it is
+The engine's bookkeeping is the one piece every workflow shares, so it is
 tested adversarially. [`tests/support/model.rs`](tests/support/model.rs)
 holds two *model-based* harnesses. Each takes a script of host calls —
 including illegal ones: unknown or foreign IDs, wrong reply payloads,
@@ -235,7 +250,7 @@ against a deliberately naive reference model, and asserts they agree after
 every step:
 
 * `run_core` drives `ManualWorkflowCore` directly, as a workflow would;
-* `run_session` drives a complete `Workflow` through the public
+* `run_workflow` drives a complete `Workflow` through the public
   `advance` / `fulfill` / `outstanding_requests` / `finish` contract.
 
 Two front ends feed them:
@@ -250,8 +265,8 @@ Two front ends feed them:
 
   ```sh
   cargo install cargo-fuzz --locked --version 0.13.2
-  cargo +nightly fuzz run session_core tests/corpus/session_core
-  cargo +nightly fuzz run fan_out_session tests/corpus/fan_out_session
+  cargo +nightly fuzz run workflow_core tests/corpus/workflow_core
+  cargo +nightly fuzz run fan_out_workflow tests/corpus/fan_out_workflow
   ```
 
   The tracked seeds live in [`tests/corpus`](tests/corpus) so the packaged

@@ -11,15 +11,15 @@
 // specific language governing permissions and limitations under
 // each license.
 
-//! Driving one [`Workflow`] from inside another session's [`CoroutineWorkflow`].
+//! Driving one [`Workflow`] from inside another [`CoroutineWorkflow`].
 //!
-//! A composing session — one that runs other sessions on its host's
+//! A composing workflow — one that runs other workflows on its host's
 //! behalf, answering some of their requests itself and forwarding the
 //! rest — would otherwise need a hand-written translation layer: a map
 //! from each request it issued to the inner request it stands in for, a
-//! phase enum per inner session, and a loop that feeds replies down,
+//! phase enum per inner workflow, and a loop that feeds replies down,
 //! advances, and issues whatever comes back up. [`Nested`] is that layer,
-//! written once, for a workflow's `async fn`: the inner session becomes a
+//! written once, for a workflow's `async fn`: the inner workflow becomes a
 //! stream of requests the workflow takes one at a time with
 //! [`Nested::next`], and answers either itself, with [`Nested::fulfill`],
 //! or by handing the [`PendingReply`] of a request it issued to its own
@@ -44,7 +44,7 @@ use crate::{
 };
 
 /// Turns the outer host's reply to a forwarded request into the reply the
-/// inner session expects.
+/// inner workflow expects.
 type ReplyMap<S, Req> = fn(<Req as Request>::Reply) -> <<S as Workflow>::Request as Request>::Reply;
 
 /// An inner request forwarded to the outer host, awaiting its reply.
@@ -58,7 +58,7 @@ struct Forward<S: Workflow, Req: Request> {
 /// fn`, whose requests the workflow answers itself or forwards to its own
 /// host, issuing requests of type `Req`.
 ///
-/// The inner session may be any [`Workflow`] — a hand-written state machine
+/// The inner workflow may be any [`Workflow`] — a hand-written state machine
 /// or another [`CoroutineWorkflow`](crate::CoroutineWorkflow) — and it is driven exactly as
 /// its contract requires; nothing about it needs to know it is nested.
 ///
@@ -101,7 +101,7 @@ struct Forward<S: Workflow, Req: Request> {
 ///     Ok(host.request(Ask).await + 1)
 /// }
 ///
-/// // The outer workflow forwards the inner session's question to its own
+/// // The outer workflow forwards the inner workflow's question to its own
 /// // host, translating the reply on its way back down.
 /// async fn outer(host: Host<AskText>) -> Result<u32, ProtocolError> {
 ///     let mut nested = Nested::new(CoroutineWorkflow::new(inner));
@@ -116,23 +116,23 @@ struct Forward<S: Workflow, Req: Request> {
 /// // The outer host sees only its own vocabulary.
 /// use contentauth_sans_io_core::{Step, Workflow};
 ///
-/// let mut session = CoroutineWorkflow::new(outer);
-/// assert_eq!(session.advance()?, Step::AwaitHost);
-/// let id = session.outstanding_requests()[0].id;
-/// session.fulfill(id, "41".to_owned())?;
-/// assert_eq!(session.advance()?, Step::Complete);
-/// assert_eq!(session.finish()?, 42);
+/// let mut workflow = CoroutineWorkflow::new(outer);
+/// assert_eq!(workflow.advance()?, Step::AwaitHost);
+/// let id = workflow.outstanding_requests()[0].id;
+/// workflow.fulfill(id, "41".to_owned())?;
+/// assert_eq!(workflow.advance()?, Step::Complete);
+/// assert_eq!(workflow.finish()?, 42);
 /// # Ok::<(), ProtocolError>(())
 /// ```
 pub struct Nested<S: Workflow, Req: Request> {
-    session: S,
+    workflow: S,
 
     /// Inner requests already handed out by [`Self::next`] and not yet
     /// answered, as far as this adapter knows.
     taken: Vec<RequestId>,
 
-    /// Inner requests the inner session has issued but [`Self::next`] has
-    /// not yet handed out, in the order the inner session issued them.
+    /// Inner requests the inner workflow has issued but [`Self::next`] has
+    /// not yet handed out, in the order the inner workflow issued them.
     queued: VecDeque<HostRequest<S::Request>>,
 
     forwards: Vec<Forward<S, Req>>,
@@ -145,34 +145,34 @@ where
     S::Error: From<ProtocolError>,
     Req: Request,
 {
-    /// Wraps `session`, which has not yet been advanced.
-    pub fn new(session: S) -> Self {
+    /// Wraps a workflow that has not yet been advanced.
+    pub fn new(workflow: S) -> Self {
         Self {
-            session,
+            workflow,
             taken: Vec::new(),
             queued: VecDeque::new(),
             forwards: Vec::new(),
         }
     }
 
-    /// The inner session's next request, or `None` once it has completed
+    /// The inner workflow's next request, or `None` once it has completed
     /// (after which [`Self::finish`] hands over its output).
     ///
     /// Every request returned must eventually be answered — with
     /// [`Self::fulfill`] or [`Self::forward`]. Requests may be collected
-    /// across calls, but if nothing else could unblock the inner session,
+    /// across calls, but if nothing else could unblock the inner workflow,
     /// this fails with
     /// [`ProtocolError::UnansweredRequest`] rather than wait forever.
     ///
     /// Waits, returning [`Step::AwaitHost`] from the enclosing workflow's
-    /// `advance`, only when the inner session is itself waiting on nothing
+    /// `advance`, only when the inner workflow is itself waiting on nothing
     /// but forwarded requests; a reply to any one of them is delivered as
     /// soon as it arrives, so forwarded requests are in flight with the
     /// outer host concurrently, in whatever order it answers them.
     ///
     /// # Errors
     ///
-    /// Whatever the inner session's [`Workflow::advance`] or
+    /// Whatever the inner workflow's [`Workflow::advance`] or
     /// [`Workflow::fulfill`] reports, or [`ProtocolError::UnansweredRequest`].
     pub async fn next(&mut self) -> Result<Option<HostRequest<S::Request>>, S::Error> {
         loop {
@@ -181,11 +181,11 @@ where
                 return Ok(Some(request));
             }
 
-            if self.session.advance()? == Step::Complete {
+            if self.workflow.advance()? == Step::Complete {
                 return Ok(None);
             }
 
-            let outstanding = self.session.outstanding_requests();
+            let outstanding = self.workflow.outstanding_requests();
             self.taken
                 .retain(|id| outstanding.iter().any(|request| request.id == *id));
             for request in outstanding {
@@ -208,7 +208,7 @@ where
             }
 
             for (inner, reply) in self.any_forward_ready().await {
-                self.session.fulfill(inner, reply)?;
+                self.workflow.fulfill(inner, reply)?;
             }
         }
     }
@@ -217,19 +217,19 @@ where
     ///
     /// # Errors
     ///
-    /// Whatever the inner session's [`Workflow::fulfill`] reports.
+    /// Whatever the inner workflow's [`Workflow::fulfill`] reports.
     pub fn fulfill(
         &mut self,
         id: RequestId,
         reply: <S::Request as Request>::Reply,
     ) -> Result<(), S::Error> {
-        self.session.fulfill(id, reply)
+        self.workflow.fulfill(id, reply)
     }
 
     /// Answers `id`, a request [`Self::next`] returned, with whatever the
     /// outer host replies to `reply`'s request, translated by `map`.
     ///
-    /// The reply is delivered to the inner session from within a later
+    /// The reply is delivered to the inner workflow from within a later
     /// [`Self::next`], as soon as it has arrived.
     pub fn forward(&mut self, id: RequestId, reply: PendingReply<Req>, map: ReplyMap<S, Req>) {
         self.forwards.push(Forward {
@@ -239,20 +239,20 @@ where
         });
     }
 
-    /// Consumes the adapter and returns the inner session's output, once
+    /// Consumes the adapter and returns the inner workflow's output, once
     /// [`Self::next`] has returned `None`.
     ///
     /// # Errors
     ///
-    /// Whatever the inner session's [`Workflow::finish`] reports.
+    /// Whatever the inner workflow's [`Workflow::finish`] reports.
     pub fn finish(self) -> Result<S::Output, S::Error> {
-        self.session.finish()
+        self.workflow.finish()
     }
 
-    /// The inner session's diagnostic phase, for a composing workflow's
+    /// The inner workflow's diagnostic phase, for a composing workflow's
     /// own [`Host::set_phase`](crate::Host::set_phase) report.
     pub fn phase(&self) -> String {
-        self.session.phase()
+        self.workflow.phase()
     }
 
     /// Waits until at least one forwarded request has its reply, then
@@ -290,7 +290,7 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Nested")
-            .field("session", &self.session)
+            .field("workflow", &self.workflow)
             .field("taken", &self.taken)
             .field(
                 "forwarded",
@@ -390,8 +390,8 @@ mod tests {
         nested.finish()
     }
 
-    fn outstanding(session: &Outer) -> Vec<(RequestId, Ask)> {
-        session
+    fn outstanding(workflow: &Outer) -> Vec<(RequestId, Ask)> {
+        workflow
             .outstanding_requests()
             .iter()
             .map(|r| (r.id, r.kind.clone()))
@@ -408,39 +408,39 @@ mod tests {
 
     #[test]
     fn forwarded_requests_are_in_flight_concurrently_and_answer_in_any_order() {
-        let mut session = Outer::new(forward_all);
-        assert_eq!(session.advance().unwrap(), Step::AwaitHost);
+        let mut workflow = Outer::new(forward_all);
+        assert_eq!(workflow.advance().unwrap(), Step::AwaitHost);
 
-        let first = outstanding(&session);
+        let first = outstanding(&workflow);
         assert_eq!(
             first.iter().map(|(_, k)| k.clone()).collect::<Vec<_>>(),
             [Ask::Number(1), Ask::Number(2)],
             "both inner requests reach the outer host at once, in order"
         );
 
-        // Answer the second first: the inner session still waits for both.
-        session.fulfill(first[1].0, answer(&first[1].1)).unwrap();
-        assert_eq!(session.advance().unwrap(), Step::AwaitHost);
-        assert_eq!(outstanding(&session), [first[0].clone()]);
+        // Answer the second first: the inner workflow still waits for both.
+        workflow.fulfill(first[1].0, answer(&first[1].1)).unwrap();
+        assert_eq!(workflow.advance().unwrap(), Step::AwaitHost);
+        assert_eq!(outstanding(&workflow), [first[0].clone()]);
 
-        session.fulfill(first[0].0, answer(&first[0].1)).unwrap();
-        assert_eq!(session.advance().unwrap(), Step::AwaitHost);
-        let second = outstanding(&session);
+        workflow.fulfill(first[0].0, answer(&first[0].1)).unwrap();
+        assert_eq!(workflow.advance().unwrap(), Step::AwaitHost);
+        let second = outstanding(&workflow);
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].1, Ask::Number(3));
 
-        session.fulfill(second[0].0, answer(&second[0].1)).unwrap();
-        assert_eq!(session.advance().unwrap(), Step::Complete);
-        assert_eq!(session.finish().unwrap(), 60);
+        workflow.fulfill(second[0].0, answer(&second[0].1)).unwrap();
+        assert_eq!(workflow.advance().unwrap(), Step::Complete);
+        assert_eq!(workflow.finish().unwrap(), 60);
     }
 
     #[test]
     fn advancing_without_replies_reissues_nothing() {
-        let mut session = Outer::new(forward_all);
-        assert_eq!(session.advance().unwrap(), Step::AwaitHost);
-        let first = outstanding(&session);
-        assert_eq!(session.advance().unwrap(), Step::AwaitHost);
-        assert_eq!(outstanding(&session), first);
+        let mut workflow = Outer::new(forward_all);
+        assert_eq!(workflow.advance().unwrap(), Step::AwaitHost);
+        let first = outstanding(&workflow);
+        assert_eq!(workflow.advance().unwrap(), Step::AwaitHost);
+        assert_eq!(outstanding(&workflow), first);
     }
 
     /// Answers even numbers itself and forwards odd ones, translating
@@ -466,24 +466,24 @@ mod tests {
 
     #[test]
     fn requests_can_be_answered_internally_or_forwarded() {
-        let mut session = Outer::new(answer_some);
+        let mut workflow = Outer::new(answer_some);
 
         let mut total_host_requests = 0;
         loop {
-            match session.advance().unwrap() {
+            match workflow.advance().unwrap() {
                 Step::Complete => break,
                 Step::AwaitHost => {
-                    for (id, kind) in outstanding(&session) {
+                    for (id, kind) in outstanding(&workflow) {
                         assert_eq!(kind, Ask::Text, "only odd numbers are forwarded");
                         total_host_requests += 1;
-                        session.fulfill(id, Answer::Text("four".into())).unwrap();
+                        workflow.fulfill(id, Answer::Text("four".into())).unwrap();
                     }
                 }
             }
         }
 
         assert_eq!(total_host_requests, 2);
-        assert_eq!(session.finish().unwrap(), 4 + 200 + 4);
+        assert_eq!(workflow.finish().unwrap(), 4 + 200 + 4);
     }
 
     async fn nothing_to_ask(_: Host<Ask>) -> Result<u32, TestError> {
@@ -491,19 +491,19 @@ mod tests {
     }
 
     #[test]
-    fn an_inner_session_that_never_asks_completes_at_once() {
-        let mut session = Outer::new(|_| async {
+    fn an_inner_workflow_that_never_asks_completes_at_once() {
+        let mut workflow = Outer::new(|_| async {
             let mut nested: Nested<Inner, Ask> = Nested::new(Inner::new(nothing_to_ask));
             assert!(nested.next().await?.is_none());
             nested.finish()
         });
-        assert_eq!(session.advance().unwrap(), Step::Complete);
-        assert_eq!(session.finish().unwrap(), 7);
+        assert_eq!(workflow.advance().unwrap(), Step::Complete);
+        assert_eq!(workflow.finish().unwrap(), 7);
     }
 
     #[test]
     fn a_request_taken_and_never_answered_is_reported() {
-        let mut session = Outer::new(|_| async {
+        let mut workflow = Outer::new(|_| async {
             let mut nested: Nested<Inner, Ask> = Nested::new(Inner::new(three_numbers));
             let first = nested.next().await?.unwrap();
             let _second = nested.next().await?.unwrap();
@@ -513,25 +513,25 @@ mod tests {
         });
 
         assert_eq!(
-            session.advance(),
+            workflow.advance(),
             Err(TestError::Protocol(ProtocolError::UnansweredRequest(
                 RequestId(1)
             )))
         );
         assert!(matches!(
-            session.advance(),
-            Err(TestError::Protocol(ProtocolError::SessionFailed(_)))
+            workflow.advance(),
+            Err(TestError::Protocol(ProtocolError::WorkflowFailed(_)))
         ));
     }
 
     #[test]
-    fn an_inner_error_propagates_and_fails_the_outer_session() {
+    fn an_inner_error_propagates_and_fails_the_outer_workflow() {
         async fn fails(host: Host<Ask>) -> Result<u32, TestError> {
             host.request(Ask::Number(1)).await;
             Err(TestError::Inner("boom"))
         }
 
-        let mut session = Outer::new(|host| async move {
+        let mut workflow = Outer::new(|host| async move {
             let mut nested = Nested::new(Inner::new(fails));
             while let Some(request) = nested.next().await? {
                 nested.forward(request.id, host.request(request.kind), same);
@@ -539,15 +539,15 @@ mod tests {
             nested.finish()
         });
 
-        assert_eq!(session.advance().unwrap(), Step::AwaitHost);
-        let (id, kind) = outstanding(&session).remove(0);
-        session.fulfill(id, answer(&kind)).unwrap();
-        assert_eq!(session.advance(), Err(TestError::Inner("boom")));
+        assert_eq!(workflow.advance().unwrap(), Step::AwaitHost);
+        let (id, kind) = outstanding(&workflow).remove(0);
+        workflow.fulfill(id, answer(&kind)).unwrap();
+        assert_eq!(workflow.advance(), Err(TestError::Inner("boom")));
     }
 
     #[test]
-    fn a_forwarded_reply_the_inner_session_rejects_fails_the_outer_one() {
-        let mut session = Outer::new(|host| async move {
+    fn a_forwarded_reply_the_inner_workflow_rejects_fails_the_outer_one() {
+        let mut workflow = Outer::new(|host| async move {
             let mut nested = Nested::new(Inner::new(three_numbers));
             while let Some(request) = nested.next().await? {
                 // The wrong kind of reply for a `Number` request.
@@ -558,18 +558,18 @@ mod tests {
             nested.finish()
         });
 
-        assert_eq!(session.advance().unwrap(), Step::AwaitHost);
-        let (id, kind) = outstanding(&session).remove(0);
-        session.fulfill(id, answer(&kind)).unwrap();
+        assert_eq!(workflow.advance().unwrap(), Step::AwaitHost);
+        let (id, kind) = outstanding(&workflow).remove(0);
+        workflow.fulfill(id, answer(&kind)).unwrap();
         assert!(matches!(
-            session.advance(),
+            workflow.advance(),
             Err(TestError::Protocol(ProtocolError::ReplyMismatch { .. }))
         ));
     }
 
     #[test]
-    fn an_internal_answer_the_inner_session_rejects_is_reported() {
-        let mut session = Outer::new(|_| async {
+    fn an_internal_answer_the_inner_workflow_rejects_is_reported() {
+        let mut workflow = Outer::new(|_| async {
             let mut nested: Nested<Inner, Ask> = Nested::new(Inner::new(three_numbers));
             let request = nested.next().await?.unwrap();
             nested.fulfill(request.id, Answer::Text(String::new()))?;
@@ -577,12 +577,12 @@ mod tests {
         });
 
         assert!(matches!(
-            session.advance(),
+            workflow.advance(),
             Err(TestError::Protocol(ProtocolError::ReplyMismatch { .. }))
         ));
     }
 
-    /// A hand-written session that waits without asking for anything —
+    /// A hand-written workflow that waits without asking for anything —
     /// a bug in it, which the adapter must not turn into a hang.
     #[derive(Debug, Default)]
     struct WaitsOnNothing {
@@ -611,25 +611,25 @@ mod tests {
         }
 
         fn finish(self) -> Result<u32, TestError> {
-            Err(ProtocolError::SessionNotComplete.into())
+            Err(ProtocolError::WorkflowNotComplete.into())
         }
     }
 
     #[test]
-    fn an_inner_session_waiting_on_nothing_is_reported_as_stalled() {
-        let mut session = Outer::new(|_| async {
+    fn an_inner_workflow_waiting_on_nothing_is_reported_as_stalled() {
+        let mut workflow = Outer::new(|_| async {
             let mut nested: Nested<WaitsOnNothing, Ask> = Nested::new(WaitsOnNothing::default());
             nested.next().await?;
             nested.finish()
         });
 
         assert_eq!(
-            session.advance(),
+            workflow.advance(),
             Err(TestError::Protocol(ProtocolError::WorkflowStalled))
         );
     }
 
-    /// A hand-written inner session — the [`ManualWorkflowCore`] shape, not a
+    /// A hand-written inner workflow — the [`ManualWorkflowCore`] shape, not a
     /// [`CoroutineWorkflow`] — is consumed exactly the same way.
     #[derive(Debug, Default)]
     struct Doubler {
@@ -679,13 +679,13 @@ mod tests {
 
         fn finish(self) -> Result<u32, TestError> {
             self.core.finish_check()?;
-            self.result.ok_or(ProtocolError::SessionNotComplete.into())
+            self.result.ok_or(ProtocolError::WorkflowNotComplete.into())
         }
     }
 
     #[test]
-    fn a_hand_written_inner_session_is_driven_the_same_way() {
-        let mut session = Outer::new(|host| async move {
+    fn a_hand_written_inner_workflow_is_driven_the_same_way() {
+        let mut workflow = Outer::new(|host| async move {
             let mut nested = Nested::new(Doubler::default());
             while let Some(request) = nested.next().await? {
                 nested.forward(request.id, host.request(request.kind), same);
@@ -693,16 +693,16 @@ mod tests {
             nested.finish()
         });
 
-        assert_eq!(session.advance().unwrap(), Step::AwaitHost);
-        let (id, kind) = outstanding(&session).remove(0);
+        assert_eq!(workflow.advance().unwrap(), Step::AwaitHost);
+        let (id, kind) = outstanding(&workflow).remove(0);
         assert_eq!(kind, Ask::Number(21));
-        session.fulfill(id, Answer::Number(21)).unwrap();
-        assert_eq!(session.advance().unwrap(), Step::Complete);
-        assert_eq!(session.finish().unwrap(), 42);
+        workflow.fulfill(id, Answer::Number(21)).unwrap();
+        assert_eq!(workflow.advance().unwrap(), Step::Complete);
+        assert_eq!(workflow.finish().unwrap(), 42);
     }
 
     #[test]
-    fn debug_shows_the_inner_session_and_forwarded_requests() {
+    fn debug_shows_the_inner_workflow_and_forwarded_requests() {
         let nested: Nested<Doubler, Ask> = Nested::new(Doubler::default());
         let text = format!("{nested:?}");
         assert!(text.contains("Nested"));

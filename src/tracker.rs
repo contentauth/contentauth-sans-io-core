@@ -19,12 +19,12 @@ use crate::{
     types::RequestId,
 };
 
-/// Tracks the requests a session has issued but the host has not yet
+/// Tracks the requests a workflow has issued but the host has not yet
 /// fulfilled, and holds fulfilled replies until the state machine consumes
 /// them on its next `advance`.
 ///
-/// Generic over the session's own request vocabulary `Req`, so every
-/// concrete session built on this engine gets request issuance, ID
+/// Generic over the workflow's own request vocabulary `Req`, so every
+/// concrete workflow built on this engine gets request issuance, ID
 /// correlation, and reply-shape validation for free rather than
 /// hand-rolling it.
 #[derive(Debug)]
@@ -45,7 +45,7 @@ impl<Req: Request> Default for RequestTracker<Req> {
 }
 
 impl<Req: Request> RequestTracker<Req> {
-    /// Issues a new request with a session-unique ID and returns that ID.
+    /// Issues a new request with a workflow-unique ID and returns that ID.
     pub fn issue(&mut self, kind: Req) -> RequestId {
         let id = RequestId(self.next_id);
         self.next_id += 1;
