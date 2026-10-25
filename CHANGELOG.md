@@ -10,9 +10,4 @@ _25 October 2026_
 
 ### Added
 
-* Add standalone sans-I/O workflow crate ([#1](https://github.com/contentauth/contentauth-sans-io-core/pull/1))
-
-### Other
-
-* Save uncommitted changes
-* Initial commit
+* Initial public release
