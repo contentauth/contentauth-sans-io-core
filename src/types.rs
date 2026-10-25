@@ -11,16 +11,16 @@
 // specific language governing permissions and limitations under
 // each license.
 
-//! Foundation types shared by every session built on this engine.
+//! Foundation types shared by every workflow built on this engine.
 
 use std::fmt;
 
-/// Identifies one outstanding request within a single session.
+/// Identifies one outstanding request within a single workflow.
 ///
-/// Request IDs are unique within a session (never reused, even after the
-/// request is fulfilled) but carry no meaning across sessions or between
-/// two sessions of different types. The host echoes the ID back when
-/// reporting the outcome of a request, which is what lets a session issue
+/// Request IDs are unique within a workflow (never reused, even after the
+/// request is fulfilled) but carry no meaning across workflows or between
+/// two workflows of different types. The host echoes the ID back when
+/// reporting the outcome of a request, which is what lets a workflow issue
 /// several requests at once and accept their outcomes in any order.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct RequestId(pub(crate) u64);

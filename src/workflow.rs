@@ -11,7 +11,7 @@
 // specific language governing permissions and limitations under
 // each license.
 
-//! The session interaction contract, and a helper for implementing it.
+//! The workflow interaction contract, and a helper for implementing it.
 
 use std::fmt;
 
@@ -22,35 +22,39 @@ use crate::{
     types::RequestId,
 };
 
-/// The observable result of advancing a session.
+/// The observable result of advancing a workflow.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum Step {
-    /// The session is blocked on one or more host requests. Inspect
+    /// The workflow is waiting on one or more host requests. Inspect
     /// `outstanding_requests`, service at least one of them, report the
     /// outcome via `fulfill`, and advance again.
     AwaitHost,
 
-    /// The workflow has finished. Consume the session with `finish` to
+    /// The workflow has finished. Consume it with `finish` to
     /// obtain its result.
     Complete,
 }
 
 /// The host-driven interaction contract, independent of implementation style.
 ///
-/// Implement this with an explicit state machine using [`ManualWorkflowCore`],
-/// or with a coroutine-style `async fn` using
-/// [`CoroutineWorkflow`](crate::CoroutineWorkflow). Both expose the same
-/// synchronous interface; the host owns external operations and scheduling.
+/// Prefer a coroutine-style `async fn` using
+/// [`CoroutineWorkflow`](crate::CoroutineWorkflow), which lets the compiler
+/// generate the state machine without requiring an async runtime. Use
+/// [`ManualWorkflowCore`] instead when you need an explicit, inspectable state
+/// machine. Both expose the same synchronous interface; the host owns
+/// external operations and scheduling.
 ///
-/// This is the "sans-I/O" pattern applied to a state machine: a session runs
-/// entirely synchronously and never blocks. When it cannot make further
-/// progress on its own, it parks itself and reports the operations
-/// ([`Self::outstanding_requests`]) it needs the host to perform. The host
-/// services them — concurrently and in any order, if it likes — and reports
-/// each outcome via [`Self::fulfill`]. Calling [`Self::advance`] again lets
-/// the session consume whatever outcomes have arrived and make further
-/// progress.
+/// This is the "sans-I/O" pattern applied to a state machine: when a workflow
+/// cannot make further progress without a host operation, it yields control
+/// and reports the operations ([`Self::outstanding_requests`]) it needs the
+/// host to perform. In the coroutine style, an `.await` may suspend the
+/// workflow, but [`Self::advance`] returns [`Step::AwaitHost`] rather than
+/// blocking the host's thread waiting for a reply. The host remains free to
+/// do other work, service those operations — concurrently and in any order,
+/// if it likes — and report each outcome via [`Self::fulfill`]. Calling
+/// [`Self::advance`] again lets the workflow consume whatever outcomes have
+/// arrived and make further progress.
 ///
 /// ```text
 ///              ┌────────────────────────────────────────────────┐
@@ -66,58 +70,58 @@ pub enum Step {
 ///              └────────────────────────────────────────────────┘
 /// ```
 ///
-/// 1. Create the session (each implementation defines its own constructor
+/// 1. Create the workflow (each implementation defines its own constructor
 ///    and settings).
-/// 2. Call [`Self::advance`]. It returns [`Step::AwaitHost`] when blocked on
+/// 2. Call [`Self::advance`]. It returns [`Step::AwaitHost`] when waiting on
 ///    the host, or [`Step::Complete`] once the workflow has finished.
 /// 3. While `AwaitHost`: service any subset of [`Self::outstanding_requests`]
 ///    and report each outcome via [`Self::fulfill`], then call
 ///    [`Self::advance`] again. Outcomes may be reported in any order.
-/// 4. On `Complete`: consume the session with [`Self::finish`] to obtain its
+/// 4. On `Complete`: consume the workflow with [`Self::finish`] to obtain its
 ///    result.
 ///
-/// A session is a `Send` value meant to be handed across threads or tasks,
+/// A workflow is a `Send` value meant to be handed across threads or tasks,
 /// not accessed concurrently. Implementations may use internal shared
 /// state: [`CoroutineWorkflow`](crate::CoroutineWorkflow) uses a synchronized mailbox shared
 /// with its future.
 ///
 /// # Not re-entrant; host calls must be serialized
 ///
-/// Sessions are **not re-entrant**. Internal synchronization does not lock
-/// the session's API or replace host-side serialization. A host that employs
-/// a thread model must ensure that the methods of a session (`advance`, `fulfill`,
+/// Workflows are **not re-entrant**. Internal synchronization does not lock
+/// the workflow's API or replace host-side serialization. A host that employs
+/// a thread model must ensure that the methods of a workflow (`advance`, `fulfill`,
 /// `outstanding_requests`, `respond`, `finish`) are never called simultaneously from
 /// multiple threads, nor re-entered from within a call already in progress
-/// on the same session. In safe Rust the borrow checker does much of this
+/// on the same workflow. In safe Rust the borrow checker does much of this
 /// for you (`advance` and `fulfill` take `&mut self`, `finish` takes `self`),
 /// but it is no substitute for the host's own serialization: wrapping a
-/// session in a lock-free shared cell, or reaching it through an FFI or other
+/// workflow in a lock-free shared cell, or reaching it through an FFI or other
 /// binding that hands out raw handles, bypasses it. Violating the constraint is
 /// likely to cause crashes or unpredictable behavior.
 ///
-/// Calls on *different* sessions may safely run at the same time; only calls
-/// on the *same* session must not. Moving a session to another thread
+/// Calls on *different* workflows may safely run at the same time; only calls
+/// on the *same* workflow must not. Moving a workflow to another thread
 /// between calls is also fine.
 ///
 /// This trait provides a synchronous reply helper so that host-side code (a test
 /// harness, an FFI dispatcher, a generic driver loop) can be written once
-/// against any session built on this engine, whatever workflow it carries
+/// against any workflow built on this engine, whatever work it carries
 /// out.
 pub trait Workflow: Send {
-    /// This session's request vocabulary.
+    /// This workflow's request vocabulary.
     type Request: Request;
 
     /// The workflow's product, returned by [`Self::finish`].
     type Output;
 
-    /// This session's error type. Expected to fold in [`ProtocolError`] (for
+    /// This workflow's error type. Expected to fold in [`ProtocolError`] (for
     /// example, via `#[from]`) alongside whatever domain-specific failures
-    /// its own workflow can produce.
+    /// its own logic can produce.
     type Error: From<ProtocolError>;
 
     /// Performs as much synchronous work as possible.
     ///
-    /// Returns [`Step::AwaitHost`] if the session is blocked on host
+    /// Returns [`Step::AwaitHost`] if the workflow is waiting on host
     /// requests, or [`Step::Complete`] once the workflow has finished
     /// (idempotently, on subsequent calls as well).
     fn advance(&mut self) -> Result<Step, Self::Error>;
@@ -125,17 +129,17 @@ pub trait Workflow: Send {
     /// Returns the requests the host has not yet fulfilled.
     fn outstanding_requests(&self) -> &[HostRequest<Self::Request>];
 
-    /// Describes where in its workflow the session is, for diagnostics.
+    /// Describes the workflow's current phase, for diagnostics.
     ///
-    /// The name of the session's current workflow phase — for example,
-    /// `AwaitingSigningTime`. A session that runs others inside it reports
+    /// The name of the workflow's current phase — for example,
+    /// `AwaitingSigningTime`. A workflow that runs others inside it reports
     /// its own phase followed by theirs, separated by `" > "` (for example,
     /// `Reading > AwaitingOcspResponses`), so the most specific phase is
     /// always last.
     ///
-    /// Once the session has failed, this reports the phase it failed *in*,
+    /// Once the workflow has failed, this reports the phase it failed *in*,
     /// not whatever internal placeholder it was left in — the same phase
-    /// [`ProtocolError::SessionFailed`] names. Meant for logs, error reports,
+    /// [`ProtocolError::WorkflowFailed`] names. Meant for logs, error reports,
     /// and transcripts (see [`Recorder`](crate::Recorder)); the wording is
     /// not a stable interface and should not be matched on.
     fn phase(&self) -> String;
@@ -143,7 +147,7 @@ pub trait Workflow: Send {
     /// Reports the outcome of one outstanding request.
     ///
     /// Outcomes may be reported in any order and at any pace; call
-    /// [`Self::advance`] afterward to let the session consume them.
+    /// [`Self::advance`] afterward to let the workflow consume them.
     fn fulfill(
         &mut self,
         id: RequestId,
@@ -154,13 +158,13 @@ pub trait Workflow: Send {
     /// order, without cloning requests or allocating a reply batch.
     ///
     /// `answer` borrows each request only until it returns an owned reply;
-    /// that borrow ends before [`Self::fulfill`] mutates the session.
+    /// that borrow ends before [`Self::fulfill`] mutates the workflow.
     /// Host failures should be represented in the request vocabulary's
     /// reply type, just as with a direct call to `fulfill`.
     ///
     /// Stops at the first `fulfill` error. Earlier replies remain delivered
     /// and later requests have not been serviced. With no outstanding
-    /// requests this is a no-op, including on a terminal session.
+    /// requests this is a no-op, including on a terminal workflow.
     ///
     /// Does not call [`Self::advance`]. For asynchronous work, partial
     /// fulfillment, or a different service order, use
@@ -180,16 +184,16 @@ pub trait Workflow: Send {
         Ok(())
     }
 
-    /// Consumes the session and returns the completed result.
+    /// Consumes the workflow and returns the completed result.
     ///
-    /// Implementations should fail with [`ProtocolError::SessionNotComplete`]
+    /// Implementations should fail with [`ProtocolError::WorkflowNotComplete`]
     /// if the workflow has not reached [`Step::Complete`].
     fn finish(self) -> Result<Self::Output, Self::Error>;
 }
 
-/// Tracks whether a session is still running, has finished, or has failed.
+/// Tracks whether a workflow is still running, has finished, or has failed.
 ///
-/// Kept separate from a concrete session's own workflow-phase state (its
+/// Kept separate from a concrete workflow's own phase state (its
 /// "where in the workflow am I" enum) so that phase enum never needs
 /// `Complete` or `Failed` variants of its own — [`ManualWorkflowCore`] is the single
 /// place that decides whether [`ManualWorkflowCore::fulfill`] and
@@ -203,12 +207,13 @@ enum Lifecycle {
 
 /// Request and lifecycle bookkeeping for a hand-written [`Workflow`].
 ///
-/// This helper does not implement the workflow's state machine: the caller
-/// writes its own explicit phases and transitions. For a compiler-generated
-/// state machine written with `async`/`.await`, use
-/// [`CoroutineWorkflow`](crate::CoroutineWorkflow) instead.
+/// Prefer [`CoroutineWorkflow`](crate::CoroutineWorkflow) for most workflows:
+/// `async`/`.await` lets the compiler generate the state machine. Use this
+/// helper when you need explicit, inspectable phases and transitions. It
+/// handles bookkeeping, not the state machine itself; the caller writes
+/// that logic.
 ///
-/// A concrete session embeds one of these alongside its own workflow-phase
+/// A concrete workflow embeds one of these alongside its own phase
 /// state and delegates [`Workflow::outstanding_requests`] and
 /// [`Workflow::fulfill`] to it directly. Its `advance` method issues requests
 /// through [`Self::issue`] and consumes replies through [`Self::take_reply`],
@@ -255,12 +260,12 @@ enum Lifecycle {
 ///     NoPong,
 /// }
 ///
-/// struct PingSession {
+/// struct PingWorkflow {
 ///     core: ManualWorkflowCore<PingRequest>,
 ///     request: Option<RequestId>,
 /// }
 ///
-/// impl PingSession {
+/// impl PingWorkflow {
 ///     fn new() -> Self {
 ///         Self {
 ///             core: ManualWorkflowCore::default(),
@@ -269,7 +274,7 @@ enum Lifecycle {
 ///     }
 /// }
 ///
-/// impl Workflow for PingSession {
+/// impl Workflow for PingWorkflow {
 ///     type Error = PingError;
 ///     type Output = ();
 ///     type Request = PingRequest;
@@ -326,14 +331,14 @@ enum Lifecycle {
 ///     }
 /// }
 ///
-/// let mut session = PingSession::new();
-/// assert_eq!(session.advance()?, Step::AwaitHost);
+/// let mut workflow = PingWorkflow::new();
+/// assert_eq!(workflow.advance()?, Step::AwaitHost);
 ///
-/// let id = session.outstanding_requests()[0].id;
-/// session.fulfill(id, PingReply::Pong)?;
+/// let id = workflow.outstanding_requests()[0].id;
+/// workflow.fulfill(id, PingReply::Pong)?;
 ///
-/// assert_eq!(session.advance()?, Step::Complete);
-/// session.finish()?;
+/// assert_eq!(workflow.advance()?, Step::Complete);
+/// workflow.finish()?;
 /// # Ok::<(), PingError>(())
 /// ```
 #[derive(Debug)]
@@ -352,7 +357,7 @@ impl<Req: Request> Default for ManualWorkflowCore<Req> {
 }
 
 impl<Req: Request> ManualWorkflowCore<Req> {
-    /// Issues a new request with a session-unique ID and returns that ID.
+    /// Issues a new request with a workflow-unique ID and returns that ID.
     pub fn issue(&mut self, kind: Req) -> RequestId {
         self.tracker.issue(kind)
     }
@@ -369,15 +374,15 @@ impl<Req: Request> ManualWorkflowCore<Req> {
 
     /// Reports the outcome of one outstanding request.
     ///
-    /// Rejects the reply with [`ProtocolError::SessionComplete`] or
-    /// [`ProtocolError::SessionFailed`] once the session has reached a
+    /// Rejects the reply with [`ProtocolError::WorkflowComplete`] or
+    /// [`ProtocolError::WorkflowFailed`] once the workflow has reached a
     /// terminal state, before consulting the underlying
     /// [`RequestTracker`].
     pub fn fulfill(&mut self, id: RequestId, reply: Req::Reply) -> Result<(), ProtocolError> {
         match &self.lifecycle {
-            Lifecycle::Complete => return Err(ProtocolError::SessionComplete),
+            Lifecycle::Complete => return Err(ProtocolError::WorkflowComplete),
             Lifecycle::Failed(failure) => {
-                return Err(ProtocolError::SessionFailed(failure.clone()))
+                return Err(ProtocolError::WorkflowFailed(failure.clone()))
             }
             Lifecycle::Running => {}
         }
@@ -385,34 +390,34 @@ impl<Req: Request> ManualWorkflowCore<Req> {
         self.tracker.fulfill(id, reply)
     }
 
-    /// Marks the session complete. After this call, [`Self::fulfill`]
+    /// Marks the workflow complete. After this call, [`Self::fulfill`]
     /// rejects further replies and [`Self::finish_check`] succeeds.
     pub fn mark_complete(&mut self) {
         self.lifecycle = Lifecycle::Complete;
     }
 
-    /// Marks the session failed in `phase`, because of `cause`. After this
+    /// Marks the workflow failed in `phase`, because of `cause`. After this
     /// call, [`Self::fulfill`] and [`Self::finish_check`] both fail with
-    /// [`ProtocolError::SessionFailed`], which reports `phase` and `cause`.
+    /// [`ProtocolError::WorkflowFailed`], which reports `phase` and `cause`.
     ///
     /// Call this from every error exit of a workflow's `advance` method — the
     /// same "poison on the way out" idiom [`core::mem::replace`] gives a
-    /// workflow-phase enum applies here to the session's lifecycle, so a
+    /// workflow-phase enum applies here to the workflow's lifecycle, so a
     /// half-built result is never mistaken for a finished one. Pass the
-    /// phase the session was in *before* it began the work that failed
+    /// phase the workflow was in *before* it began the work that failed
     /// (what [`Workflow::phase`] reported then), not the placeholder the
     /// failure left behind, and the error being returned as `cause`.
     ///
     /// Only the first failure is remembered: a later call (for example, an
-    /// `advance` on a session already poisoned) does not overwrite where the
-    /// session originally went wrong.
+    /// `advance` on a workflow already poisoned) does not overwrite where the
+    /// workflow originally went wrong.
     pub fn mark_failed(&mut self, phase: impl Into<String>, cause: &dyn fmt::Display) {
         if !matches!(self.lifecycle, Lifecycle::Failed(_)) {
             self.lifecycle = Lifecycle::Failed(Failure::new(phase, cause));
         }
     }
 
-    /// Where and why the session failed, if it has.
+    /// Where and why the workflow failed, if it has.
     pub fn failure(&self) -> Option<&Failure> {
         match &self.lifecycle {
             Lifecycle::Failed(failure) => Some(failure),
@@ -420,45 +425,45 @@ impl<Req: Request> ManualWorkflowCore<Req> {
         }
     }
 
-    /// The [`ProtocolError::SessionFailed`] to report from a call made after
-    /// the session failed, naming where and why it did.
+    /// The [`ProtocolError::WorkflowFailed`] to report from a call made after
+    /// the workflow failed, naming where and why it did.
     ///
-    /// For a session's own "already poisoned" exits (an `advance` that finds
+    /// For a workflow's own "already poisoned" exits (an `advance` that finds
     /// its workflow phase left behind by an earlier failure, say). If the
-    /// session has somehow not been marked failed, the report says so only
+    /// workflow has somehow not been marked failed, the report says so only
     /// generically rather than inventing a cause.
     pub fn failed_error(&self) -> ProtocolError {
-        ProtocolError::SessionFailed(self.failure().cloned().unwrap_or_default())
+        ProtocolError::WorkflowFailed(self.failure().cloned().unwrap_or_default())
     }
 
-    /// Reports whether the session has reached [`Step::Complete`].
+    /// Reports whether the workflow has reached [`Step::Complete`].
     pub fn is_complete(&self) -> bool {
         matches!(self.lifecycle, Lifecycle::Complete)
     }
 
-    /// Reports whether the session has failed.
+    /// Reports whether the workflow has failed.
     pub fn is_failed(&self) -> bool {
         matches!(self.lifecycle, Lifecycle::Failed(_))
     }
 
-    /// Checks whether a session may hand over its result.
+    /// Checks whether a workflow may hand over its result.
     ///
-    /// A concrete session's `finish` method should call this first and
+    /// A concrete workflow's `finish` method should call this first and
     /// propagate any error before consuming `self` for its own result.
     pub fn finish_check(&self) -> Result<(), ProtocolError> {
         match &self.lifecycle {
             Lifecycle::Complete => Ok(()),
-            Lifecycle::Failed(failure) => Err(ProtocolError::SessionFailed(failure.clone())),
-            Lifecycle::Running => Err(ProtocolError::SessionNotComplete),
+            Lifecycle::Failed(failure) => Err(ProtocolError::WorkflowFailed(failure.clone())),
+            Lifecycle::Running => Err(ProtocolError::WorkflowNotComplete),
         }
     }
 
     /// Records a reply without the payload validation [`Self::fulfill`]
     /// performs.
     ///
-    /// For a concrete session's own tests that need to exercise its
+    /// For a concrete workflow's own tests that need to exercise its
     /// defense-in-depth check against a mismatched stored reply — one that
-    /// should be unreachable through [`Self::fulfill`], but that the session
+    /// should be unreachable through [`Self::fulfill`], but that the workflow
     /// still guards against.
     #[cfg(any(test, feature = "test-util"))]
     pub fn fulfill_unchecked(&mut self, id: RequestId, reply: Req::Reply) {
@@ -472,7 +477,7 @@ mod tests {
     #![allow(clippy::panic)]
 
     use super::*;
-    use crate::test_session::{Ping, PingSession, Pong};
+    use crate::test_workflow::{Ping, PingWorkflow, Pong};
 
     #[test]
     fn the_first_failure_is_the_one_remembered() {
@@ -494,13 +499,13 @@ mod tests {
         let id = core.issue(Ping::Ping(0));
         core.mark_failed("AwaitingPong", &"boom");
 
-        let expected = ProtocolError::SessionFailed(Failure::new("AwaitingPong", &"boom"));
+        let expected = ProtocolError::WorkflowFailed(Failure::new("AwaitingPong", &"boom"));
         assert_eq!(core.failed_error(), expected);
         assert_eq!(core.fulfill(id, Pong::Ok).unwrap_err(), expected);
         assert_eq!(core.finish_check().unwrap_err(), expected);
         assert_eq!(
             expected.to_string(),
-            "session failed on an earlier call, in AwaitingPong: boom"
+            "workflow failed on an earlier call, in AwaitingPong: boom"
         );
     }
 
@@ -509,9 +514,9 @@ mod tests {
         let core = ManualWorkflowCore::<Ping>::default();
         assert_eq!(
             core.failed_error(),
-            ProtocolError::SessionFailed(Failure::default())
+            ProtocolError::WorkflowFailed(Failure::default())
         );
-        assert_eq!(core.finish_check(), Err(ProtocolError::SessionNotComplete));
+        assert_eq!(core.finish_check(), Err(ProtocolError::WorkflowNotComplete));
     }
 
     #[test]
@@ -526,33 +531,33 @@ mod tests {
     }
 
     #[test]
-    fn a_session_reports_its_phase_through_success_and_failure() {
-        let mut session = PingSession::new(1);
-        assert_eq!(session.phase(), "Start");
-        assert_eq!(session.advance().unwrap(), Step::AwaitHost);
-        assert_eq!(session.phase(), "AwaitingPong");
-        let id = session.outstanding_requests()[0].id;
-        session.fulfill(id, Pong::Ok).unwrap();
-        assert_eq!(session.advance().unwrap(), Step::Complete);
-        assert_eq!(session.phase(), "Complete");
+    fn a_workflow_reports_its_phase_through_success_and_failure() {
+        let mut workflow = PingWorkflow::new(1);
+        assert_eq!(workflow.phase(), "Start");
+        assert_eq!(workflow.advance().unwrap(), Step::AwaitHost);
+        assert_eq!(workflow.phase(), "AwaitingPong");
+        let id = workflow.outstanding_requests()[0].id;
+        workflow.fulfill(id, Pong::Ok).unwrap();
+        assert_eq!(workflow.advance().unwrap(), Step::Complete);
+        assert_eq!(workflow.phase(), "Complete");
 
-        let mut session = PingSession::new(1);
-        session.advance().unwrap();
-        let id = session.outstanding_requests()[0].id;
-        session.fulfill(id, Pong::Failed("lost")).unwrap();
-        let err = session.advance().unwrap_err();
+        let mut workflow = PingWorkflow::new(1);
+        workflow.advance().unwrap();
+        let id = workflow.outstanding_requests()[0].id;
+        workflow.fulfill(id, Pong::Failed("lost")).unwrap();
+        let err = workflow.advance().unwrap_err();
         assert_eq!(err.to_string(), "no pong: lost");
         assert!(matches!(
-            session.advance(),
-            Err(crate::test_session::PingError::Protocol(
-                ProtocolError::SessionFailed(_)
+            workflow.advance(),
+            Err(crate::test_workflow::PingError::Protocol(
+                ProtocolError::WorkflowFailed(_)
             ))
         ));
-        assert_eq!(session.phase(), "AwaitingPong");
+        assert_eq!(workflow.phase(), "AwaitingPong");
         assert!(matches!(
-            session.finish(),
-            Err(crate::test_session::PingError::Protocol(
-                ProtocolError::SessionFailed(f)
+            workflow.finish(),
+            Err(crate::test_workflow::PingError::Protocol(
+                ProtocolError::WorkflowFailed(f)
             )) if f.cause == "no pong: lost"
         ));
     }
@@ -581,12 +586,12 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct TestSession {
+    struct TestWorkflow {
         core: ManualWorkflowCore<TestRequest>,
         advances: usize,
     }
 
-    impl Workflow for TestSession {
+    impl Workflow for TestWorkflow {
         type Error = ProtocolError;
         type Output = ();
         type Request = TestRequest;
@@ -615,14 +620,14 @@ mod tests {
 
     #[test]
     fn respond_borrows_original_requests_in_order_and_delivers_each_reply() {
-        let mut session = TestSession::default();
+        let mut workflow = TestWorkflow::default();
         let payload = vec![1, 2, 3];
         let original = payload.as_ptr();
-        let first = session.core.issue(TestRequest(payload));
-        let second = session.core.issue(TestRequest(vec![4]));
+        let first = workflow.core.issue(TestRequest(payload));
+        let second = workflow.core.issue(TestRequest(vec![4]));
         let mut calls = 0;
 
-        session
+        workflow
             .respond(|request| {
                 calls += 1;
                 if calls == 1 {
@@ -637,31 +642,31 @@ mod tests {
             .unwrap();
 
         assert_eq!(calls, 2);
-        assert_eq!(session.advances, 0);
-        assert!(session.outstanding_requests().is_empty());
-        assert_eq!(session.core.take_reply(first), Some(TestReply::Accepted));
-        assert_eq!(session.core.take_reply(second), Some(TestReply::Failed));
+        assert_eq!(workflow.advances, 0);
+        assert!(workflow.outstanding_requests().is_empty());
+        assert_eq!(workflow.core.take_reply(first), Some(TestReply::Accepted));
+        assert_eq!(workflow.core.take_reply(second), Some(TestReply::Failed));
     }
 
     #[test]
-    fn session_trait_methods_expose_phase_and_running_finish_error() {
-        let mut session = TestSession::default();
+    fn workflow_trait_methods_expose_phase_and_running_finish_error() {
+        let mut workflow = TestWorkflow::default();
 
-        assert_eq!(session.phase(), "Test");
-        assert_eq!(session.advance().unwrap(), Step::AwaitHost);
-        assert_eq!(session.advances, 1);
-        assert_eq!(session.finish(), Err(ProtocolError::SessionNotComplete));
+        assert_eq!(workflow.phase(), "Test");
+        assert_eq!(workflow.advance().unwrap(), Step::AwaitHost);
+        assert_eq!(workflow.advances, 1);
+        assert_eq!(workflow.finish(), Err(ProtocolError::WorkflowNotComplete));
     }
 
     #[test]
     fn respond_stops_at_a_rejected_reply_preserving_progress_and_unserviced_requests() {
-        let mut session = TestSession::default();
-        let first = session.core.issue(TestRequest(vec![1]));
-        let second = session.core.issue(TestRequest(vec![2]));
-        let third = session.core.issue(TestRequest(vec![3]));
+        let mut workflow = TestWorkflow::default();
+        let first = workflow.core.issue(TestRequest(vec![1]));
+        let second = workflow.core.issue(TestRequest(vec![2]));
+        let third = workflow.core.issue(TestRequest(vec![3]));
         let mut seen = Vec::new();
 
-        let result = session.respond(|request| {
+        let result = workflow.respond(|request| {
             seen.push(request.0[0]);
             if request.0[0] == 2 {
                 TestReply::WrongKind
@@ -678,25 +683,25 @@ mod tests {
             })
         );
         assert_eq!(seen, [1, 2]);
-        assert_eq!(session.core.take_reply(first), Some(TestReply::Accepted));
-        assert_eq!(session.outstanding_requests()[0].id, second);
-        assert_eq!(session.outstanding_requests()[1].id, third);
+        assert_eq!(workflow.core.take_reply(first), Some(TestReply::Accepted));
+        assert_eq!(workflow.outstanding_requests()[0].id, second);
+        assert_eq!(workflow.outstanding_requests()[1].id, third);
 
-        session.respond(|_| TestReply::Accepted).unwrap();
-        assert!(session.outstanding_requests().is_empty());
+        workflow.respond(|_| TestReply::Accepted).unwrap();
+        assert!(workflow.outstanding_requests().is_empty());
     }
 
     #[test]
     fn respond_with_no_requests_is_a_no_op_even_after_completion_or_failure() {
-        let mut session = TestSession::default();
+        let mut workflow = TestWorkflow::default();
         let mut calls = 0;
         for lifecycle in [
             Lifecycle::Running,
             Lifecycle::Complete,
             Lifecycle::Failed(Failure::default()),
         ] {
-            session.core.lifecycle = lifecycle.clone();
-            session
+            workflow.core.lifecycle = lifecycle.clone();
+            workflow
                 .respond(|_| {
                     calls += 1;
                     TestReply::Accepted
@@ -704,31 +709,31 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(calls, 0);
-        assert_eq!(session.advances, 0);
+        assert_eq!(workflow.advances, 0);
     }
 
     #[test]
     fn respond_propagates_terminal_state_errors_without_servicing_later_requests() {
         for lifecycle in [Lifecycle::Complete, Lifecycle::Failed(Failure::default())] {
-            let mut session = TestSession::default();
-            session.core.issue(TestRequest(vec![1]));
-            session.core.issue(TestRequest(vec![2]));
-            session.core.lifecycle = lifecycle.clone();
+            let mut workflow = TestWorkflow::default();
+            workflow.core.issue(TestRequest(vec![1]));
+            workflow.core.issue(TestRequest(vec![2]));
+            workflow.core.lifecycle = lifecycle.clone();
             let mut calls = 0;
 
-            let result = session.respond(|_| {
+            let result = workflow.respond(|_| {
                 calls += 1;
                 TestReply::Accepted
             });
 
             let expected = if lifecycle == Lifecycle::Complete {
-                ProtocolError::SessionComplete
+                ProtocolError::WorkflowComplete
             } else {
-                ProtocolError::SessionFailed(Failure::default())
+                ProtocolError::WorkflowFailed(Failure::default())
             };
             assert_eq!(result, Err(expected));
             assert_eq!(calls, 1);
-            assert_eq!(session.outstanding_requests().len(), 2);
+            assert_eq!(workflow.outstanding_requests().len(), 2);
         }
     }
 }

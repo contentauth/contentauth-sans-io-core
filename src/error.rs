@@ -11,7 +11,7 @@
 // specific language governing permissions and limitations under
 // each license.
 
-//! The protocol-level error vocabulary common to every session built on
+//! The protocol-level error vocabulary common to every workflow built on
 //! this engine.
 
 use std::fmt;
@@ -19,21 +19,21 @@ use std::fmt;
 use crate::types::RequestId;
 
 /// A misuse of the [`Workflow`](crate::Workflow) API, as opposed to a failure
-/// of the workflow the session carries out.
+/// of the work the workflow carries out.
 ///
 /// Every one of these but [`Self::WorkflowStalled`] and
 /// [`Self::UnansweredRequest`] means the host binding
 /// is buggy — fulfilling a request that was never issued or was already
-/// answered, answering with the wrong payload type, or driving a session past a terminal state —
-/// never that the data the session is working on is somehow wrong. A
-/// concrete session's own `Error` type is expected to fold this in (for
+/// answered, answering with the wrong payload type, or driving a workflow past a terminal state —
+/// never that the data the workflow is working on is somehow wrong. A
+/// concrete workflow's own `Error` type is expected to fold this in (for
 /// example, via `#[from]`) alongside whatever domain-specific failures its
-/// own workflow can produce.
+/// own logic can produce.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[non_exhaustive]
 pub enum ProtocolError {
     /// The host fulfilled a request ID that is not outstanding in this
-    /// session (never issued, or already fulfilled).
+    /// workflow (never issued, or already fulfilled).
     #[error("no outstanding request with ID {0}")]
     UnknownRequest(RequestId),
 
@@ -47,28 +47,28 @@ pub enum ProtocolError {
         expected: &'static str,
     },
 
-    /// The session has already reached a terminal state; it cannot be
+    /// The workflow has already reached a terminal state; it cannot be
     /// advanced and no further requests can be fulfilled.
-    #[error("session is already complete")]
-    SessionComplete,
+    #[error("workflow is already complete")]
+    WorkflowComplete,
 
-    /// The session's result was requested before the session reached a
+    /// The workflow's result was requested before the workflow reached a
     /// terminal state.
-    #[error("session has not reached a terminal state")]
-    SessionNotComplete,
+    #[error("workflow has not reached a terminal state")]
+    WorkflowNotComplete,
 
-    /// The session ended in an error on an earlier call and cannot be used
+    /// The workflow ended in an error on an earlier call and cannot be used
     /// further.
     ///
-    /// A failed workflow typically leaves a session's internal state
+    /// A failed workflow typically leaves its internal state
     /// half-built, so handing anything out as if it were a result would be
-    /// misleading. Sessions built with [`ManualWorkflowCore`](crate::ManualWorkflowCore)
+    /// misleading. Workflows built with [`ManualWorkflowCore`](crate::ManualWorkflowCore)
     /// poison themselves on error: the original error is returned when it
     /// happens, and every later call reports this instead — carrying the
-    /// phase the session failed in and the original error's message, so a
+    /// phase the workflow failed in and the original error's message, so a
     /// host that only sees this later report still learns where and why.
     #[error("{0}")]
-    SessionFailed(Failure),
+    WorkflowFailed(Failure),
 
     /// A [`CoroutineWorkflow`](crate::CoroutineWorkflow) is waiting, yet has nothing
     /// outstanding that the host could answer to unblock it.
@@ -78,26 +78,26 @@ pub enum ProtocolError {
     #[error("workflow is waiting on something other than its host")]
     WorkflowStalled,
 
-    /// A workflow took a request from a [`Nested`](crate::Nested) session
+    /// A workflow took a request from a [`Nested`](crate::Nested) workflow
     /// and asked for the next one without answering it, leaving the inner
-    /// session with nothing that could ever unblock it.
+    /// workflow with nothing that could ever unblock it.
     ///
-    /// Like [`Self::WorkflowStalled`], a bug in the session, not its host.
+    /// Like [`Self::WorkflowStalled`], a bug in the workflow, not its host.
     #[error("nested request {0} was taken but never answered or forwarded")]
     UnansweredRequest(RequestId),
 }
 
-/// Where and why a session failed, as remembered by
+/// Where and why a workflow failed, as remembered by
 /// [`ManualWorkflowCore::mark_failed`](crate::ManualWorkflowCore::mark_failed) and
-/// reported by [`ProtocolError::SessionFailed`].
+/// reported by [`ProtocolError::WorkflowFailed`].
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct Failure {
-    /// The phase the session was in when it failed, as reported by
+    /// The phase the workflow was in when it failed, as reported by
     /// [`Workflow::phase`](crate::Workflow::phase). Empty if unknown.
     pub phase: String,
 
-    /// The message of the error that ended the session. Empty if unknown.
+    /// The message of the error that ended the workflow. Empty if unknown.
     pub cause: String,
 }
 
@@ -113,7 +113,7 @@ impl Failure {
 
 impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("session failed on an earlier call")?;
+        f.write_str("workflow failed on an earlier call")?;
         if !self.phase.is_empty() {
             write!(f, ", in {}", self.phase)?;
         }
@@ -145,19 +145,31 @@ mod tests {
     }
 
     #[test]
-    fn session_failed_reports_where_and_why_when_known() {
+    fn terminal_state_messages_use_workflow_terminology() {
         assert_eq!(
-            ProtocolError::SessionFailed(Failure::default()).to_string(),
-            "session failed on an earlier call"
+            ProtocolError::WorkflowComplete.to_string(),
+            "workflow is already complete"
         );
         assert_eq!(
-            ProtocolError::SessionFailed(Failure::new("Reading > AwaitingOcsp", &"revoked"))
+            ProtocolError::WorkflowNotComplete.to_string(),
+            "workflow has not reached a terminal state"
+        );
+    }
+
+    #[test]
+    fn workflow_failed_reports_where_and_why_when_known() {
+        assert_eq!(
+            ProtocolError::WorkflowFailed(Failure::default()).to_string(),
+            "workflow failed on an earlier call"
+        );
+        assert_eq!(
+            ProtocolError::WorkflowFailed(Failure::new("Reading > AwaitingOcsp", &"revoked"))
                 .to_string(),
-            "session failed on an earlier call, in Reading > AwaitingOcsp: revoked"
+            "workflow failed on an earlier call, in Reading > AwaitingOcsp: revoked"
         );
         assert_eq!(
-            ProtocolError::SessionFailed(Failure::new("", &"revoked")).to_string(),
-            "session failed on an earlier call: revoked"
+            ProtocolError::WorkflowFailed(Failure::new("", &"revoked")).to_string(),
+            "workflow failed on an earlier call: revoked"
         );
     }
 }

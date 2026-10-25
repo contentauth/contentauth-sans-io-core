@@ -11,7 +11,7 @@
 // specific language governing permissions and limitations under
 // each license.
 
-//! A minimal session for this crate's own unit tests: it issues `count`
+//! A minimal workflow for this crate's own unit tests: it issues `count`
 //! pings at once and completes when every one has been answered `Pong`.
 
 use crate::{HostRequest, ManualWorkflowCore, ProtocolError, Request, RequestId, Step, Workflow};
@@ -50,13 +50,13 @@ pub(crate) enum PingError {
 }
 
 #[derive(Debug)]
-pub(crate) struct PingSession {
+pub(crate) struct PingWorkflow {
     core: ManualWorkflowCore<Ping>,
     count: u32,
     waiting: Option<Vec<RequestId>>,
 }
 
-impl PingSession {
+impl PingWorkflow {
     pub(crate) fn new(count: u32) -> Self {
         Self {
             core: ManualWorkflowCore::default(),
@@ -66,7 +66,7 @@ impl PingSession {
     }
 }
 
-impl Workflow for PingSession {
+impl Workflow for PingWorkflow {
     type Error = PingError;
     type Output = u32;
     type Request = Ping;
@@ -189,7 +189,7 @@ mod tests {
         assert!(workflow.outstanding_requests().is_empty());
         assert!(matches!(
             workflow.fulfill(ids[0], Pong::Ok),
-            Err(PingError::Protocol(ProtocolError::SessionComplete))
+            Err(PingError::Protocol(ProtocolError::WorkflowComplete))
         ));
         let transcript = workflow.transcript().clone();
         assert_eq!(workflow.finish().unwrap(), 3);
@@ -198,12 +198,12 @@ mod tests {
 
     #[test]
     fn both_styles_share_the_host_contract_and_replay_each_other() {
-        let manual = record_success(PingSession::new(3));
+        let manual = record_success(PingWorkflow::new(3));
         let coroutine_transcript = record_success(coroutine(3));
         assert_eq!(manual.to_string(), coroutine_transcript.to_string());
         assert_eq!(replay(coroutine(3), &manual).unwrap().finish().unwrap(), 3);
         assert_eq!(
-            replay(PingSession::new(3), &coroutine_transcript)
+            replay(PingWorkflow::new(3), &coroutine_transcript)
                 .unwrap()
                 .finish()
                 .unwrap(),
@@ -221,24 +221,24 @@ mod tests {
         assert_eq!(workflow.phase(), "AwaitingPong");
         assert!(matches!(
             workflow.advance(),
-            Err(PingError::Protocol(ProtocolError::SessionFailed(f)))
+            Err(PingError::Protocol(ProtocolError::WorkflowFailed(f)))
                 if f.phase == "AwaitingPong" && f.cause == "no pong: lost"
         ));
         let transcript = workflow.transcript().clone();
         assert!(matches!(
             workflow.finish(),
-            Err(PingError::Protocol(ProtocolError::SessionFailed(_)))
+            Err(PingError::Protocol(ProtocolError::WorkflowFailed(_)))
         ));
         transcript
     }
 
     #[test]
     fn both_styles_preserve_the_same_failure_diagnostics() {
-        let manual = record_failure(PingSession::new(1));
+        let manual = record_failure(PingWorkflow::new(1));
         let coroutine_transcript = record_failure(coroutine(1));
         assert_eq!(manual.to_string(), coroutine_transcript.to_string());
         assert!(replay(coroutine(1), &manual).unwrap().finish().is_err());
-        assert!(replay(PingSession::new(1), &coroutine_transcript)
+        assert!(replay(PingWorkflow::new(1), &coroutine_transcript)
             .unwrap()
             .finish()
             .is_err());

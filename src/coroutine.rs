@@ -11,8 +11,8 @@
 // specific language governing permissions and limitations under
 // each license.
 
-//! Writing a session's workflow as an `async fn`, so the compiler — not
-//! a hand-written phase enum — generates its state machine.
+//! The preferred way to implement a workflow: write an `async fn`, so the
+//! compiler — not a hand-written phase enum — generates its state machine.
 //!
 //! [`CoroutineWorkflow`] is a [`Workflow`] like any other: the host sees the same
 //! `advance` / `outstanding_requests` / `fulfill` / `finish` contract, the
@@ -61,8 +61,8 @@ use crate::{
 /// the [`Host`] handle its future holds.
 ///
 /// Kept apart from [`CoroutineWorkflow::outstanding`] so that issuing a request
-/// never needs the session itself: a request issued from inside the future
-/// lands here, and the session moves it into its own outstanding list —
+/// never needs the workflow itself: a request issued from inside the future
+/// lands here, and the workflow moves it into its own outstanding list —
 /// which it can then lend out by reference — once the poll returns.
 struct Mailbox<Req: Request> {
     phase: String,
@@ -83,7 +83,7 @@ fn lock<Req: Request>(shared: &Shared<Req>) -> MutexGuard<'_, Mailbox<Req>> {
 
 /// The handle a workflow's `async fn` uses to ask its host for something.
 ///
-/// Cheap to clone; every clone issues into the same session.
+/// Cheap to clone; every clone issues into the same workflow.
 pub struct Host<Req: Request> {
     shared: Shared<Req>,
 }
@@ -217,8 +217,15 @@ enum State<T, E> {
     Failed(Failure),
 }
 
-/// A [`Workflow`] whose workflow is an `async fn` rather than a hand-written
+/// A [`Workflow`] implemented as an `async fn` rather than a hand-written
 /// state machine.
+///
+/// This is the preferred approach for most workflows: the compiler manages
+/// state across waits, loops, and sub-workflow calls, avoiding hand-written
+/// transitions and repeated reply-handling code. No async runtime is needed;
+/// the host drives it through the synchronous [`Workflow`] interface. Use
+/// [`ManualWorkflowCore`](crate::ManualWorkflowCore) instead when you need an
+/// explicit, inspectable state machine.
 ///
 /// On completion or failure, pending requests are cancelled: outstanding
 /// requests, stored replies, and registered wakers are discarded. Hosts
@@ -226,7 +233,7 @@ enum State<T, E> {
 /// undo host operations already performed. Dropping a single
 /// [`PendingReply`] while running does not cancel its request.
 ///
-/// A concrete session wraps one of these and delegates the
+/// A concrete workflow wraps one of these and delegates the
 /// [`Workflow`] methods to it:
 ///
 /// ```
@@ -265,11 +272,11 @@ enum State<T, E> {
 ///     Ok(x + y)
 /// }
 ///
-/// let mut session = CoroutineWorkflow::new(|host| sum_of_doubles(host, 2, 5));
-/// assert_eq!(session.advance()?, Step::AwaitHost);
+/// let mut workflow = CoroutineWorkflow::new(|host| sum_of_doubles(host, 2, 5));
+/// assert_eq!(workflow.advance()?, Step::AwaitHost);
 ///
 /// // Both requests are outstanding; answer them in reverse.
-/// for request in session
+/// for request in workflow
 ///     .outstanding_requests()
 ///     .iter()
 ///     .rev()
@@ -283,11 +290,11 @@ enum State<T, E> {
 ///     })
 ///     .collect::<Vec<_>>()
 /// {
-///     session.fulfill(request.0, Answer::Doubled(request.1))?;
+///     workflow.fulfill(request.0, Answer::Doubled(request.1))?;
 /// }
 ///
-/// assert_eq!(session.advance()?, Step::Complete);
-/// assert_eq!(session.finish()?, 14);
+/// assert_eq!(workflow.advance()?, Step::Complete);
+/// assert_eq!(workflow.finish()?, 14);
 /// # Ok::<(), ProtocolError>(())
 /// ```
 pub struct CoroutineWorkflow<Req: Request, T, E> {
@@ -301,7 +308,7 @@ where
     Req: Request + Send + 'static,
     Req::Reply: Send,
 {
-    /// Creates a session that runs the workflow `start` returns.
+    /// Creates a workflow that runs the future `start` returns.
     ///
     /// `start` is called at once, with the [`Host`] the workflow asks
     /// through; the future it returns is not polled until the first
@@ -334,7 +341,7 @@ where
     }
 
     /// Records a reply without the payload validation [`Workflow::fulfill`]
-    /// performs, for a concrete session's tests of its own
+    /// performs, for a concrete workflow's tests of its own
     /// defense-in-depth check against a reply of the wrong kind.
     #[cfg(any(test, feature = "test-util"))]
     pub fn fulfill_unchecked(&mut self, id: RequestId, reply: Req::Reply) {
@@ -401,14 +408,14 @@ where
     /// Runs the workflow until it finishes or every branch of it is
     /// waiting on the host.
     ///
-    /// An error from the workflow is returned once, and poisons the
-    /// session: every later call reports [`ProtocolError::SessionFailed`].
+    /// An error from the workflow is returned once, and poisons it:
+    /// every later call reports [`ProtocolError::WorkflowFailed`].
     fn advance(&mut self) -> Result<Step, E> {
         let future = match &mut self.state {
             State::Running(future) => future,
             State::Complete(_) => return Ok(Step::Complete),
             State::Failed(failure) => {
-                return Err(ProtocolError::SessionFailed(failure.clone()).into())
+                return Err(ProtocolError::WorkflowFailed(failure.clone()).into())
             }
         };
 
@@ -459,9 +466,9 @@ where
     fn fulfill(&mut self, id: RequestId, reply: Req::Reply) -> Result<(), E> {
         match &self.state {
             State::Running(_) => {}
-            State::Complete(_) => return Err(ProtocolError::SessionComplete.into()),
+            State::Complete(_) => return Err(ProtocolError::WorkflowComplete.into()),
             State::Failed(failure) => {
-                return Err(ProtocolError::SessionFailed(failure.clone()).into())
+                return Err(ProtocolError::WorkflowFailed(failure.clone()).into())
             }
         }
 
@@ -488,8 +495,8 @@ where
         let mut this = self;
         match mem::replace(&mut this.state, State::Failed(Failure::default())) {
             State::Complete(output) => Ok(output),
-            State::Running(_) => Err(ProtocolError::SessionNotComplete.into()),
-            State::Failed(failure) => Err(ProtocolError::SessionFailed(failure).into()),
+            State::Running(_) => Err(ProtocolError::WorkflowNotComplete.into()),
+            State::Failed(failure) => Err(ProtocolError::WorkflowFailed(failure).into()),
         }
     }
 }
@@ -581,7 +588,7 @@ mod tests {
             for count in [3, 100] {
                 let polls = Arc::new(AtomicUsize::new(0));
                 let observed = Arc::clone(&polls);
-                let mut session: TestWorkflow<usize> = CoroutineWorkflow::new(|host| async move {
+                let mut workflow: TestWorkflow<usize> = CoroutineWorkflow::new(|host| async move {
                     let replies: Vec<_> = (0..count).map(|_| host.request(Ask::Number)).collect();
                     observed.fetch_add(1, Ordering::SeqCst);
                     if unordered {
@@ -593,20 +600,20 @@ mod tests {
                     observed.fetch_add(1, Ordering::SeqCst);
                     Ok(count)
                 });
-                assert_eq!(session.advance().unwrap(), Step::AwaitHost);
-                assert_eq!(session.outstanding_requests().len(), count);
-                let ids: Vec<_> = session
+                assert_eq!(workflow.advance().unwrap(), Step::AwaitHost);
+                assert_eq!(workflow.outstanding_requests().len(), count);
+                let ids: Vec<_> = workflow
                     .outstanding_requests()
                     .iter()
                     .map(|r| r.id)
                     .collect();
                 for id in ids.into_iter().rev() {
-                    session.fulfill(id, Answer::Number(1)).unwrap();
+                    workflow.fulfill(id, Answer::Number(1)).unwrap();
                 }
                 assert_eq!(polls.load(Ordering::SeqCst), 1, "fulfill must not poll");
-                assert_eq!(session.advance().unwrap(), Step::Complete);
+                assert_eq!(workflow.advance().unwrap(), Step::Complete);
                 assert_eq!(polls.load(Ordering::SeqCst), 2);
-                assert_eq!(session.finish().unwrap(), count);
+                assert_eq!(workflow.finish().unwrap(), count);
             }
         }
     }
@@ -626,18 +633,18 @@ mod tests {
 
     #[test]
     fn reply_wakers_are_replaced_notified_outside_the_lock_and_removed_on_drop() {
-        let mut session: TestWorkflow<()> = CoroutineWorkflow::new(|_| async { Ok(()) });
+        let mut workflow: TestWorkflow<()> = CoroutineWorkflow::new(|_| async { Ok(()) });
         let host = Host {
-            shared: Arc::clone(&session.shared),
+            shared: Arc::clone(&workflow.shared),
         };
         let mut reply = host.request(Ask::Number);
-        session.collect_issued();
+        workflow.collect_issued();
         let first = Arc::new(MailboxWake {
-            shared: Arc::clone(&session.shared),
+            shared: Arc::clone(&workflow.shared),
             wakes: AtomicUsize::new(0),
         });
         let second = Arc::new(MailboxWake {
-            shared: Arc::clone(&session.shared),
+            shared: Arc::clone(&workflow.shared),
             wakes: AtomicUsize::new(0),
         });
         let first_waker = Waker::from(Arc::clone(&first));
@@ -648,11 +655,11 @@ mod tests {
         assert!(Pin::new(&mut reply)
             .poll(&mut Context::from_waker(&second_waker))
             .is_pending());
-        assert_eq!(lock(&session.shared).wakers.len(), 1);
-        session.fulfill(reply.id(), Answer::Number(7)).unwrap();
+        assert_eq!(lock(&workflow.shared).wakers.len(), 1);
+        workflow.fulfill(reply.id(), Answer::Number(7)).unwrap();
         assert_eq!(first.wakes.load(Ordering::SeqCst), 0);
         assert_eq!(second.wakes.load(Ordering::SeqCst), 1);
-        assert!(lock(&session.shared).wakers.is_empty());
+        assert!(lock(&workflow.shared).wakers.is_empty());
         assert_eq!(
             Pin::new(&mut reply).poll(&mut Context::from_waker(&second_waker)),
             Poll::Ready(Answer::Number(7))
@@ -662,13 +669,13 @@ mod tests {
             .poll(&mut Context::from_waker(&second_waker))
             .is_pending());
         drop(abandoned);
-        assert!(lock(&session.shared).wakers.is_empty());
+        assert!(lock(&workflow.shared).wakers.is_empty());
     }
 
     #[test]
     fn terminal_transitions_discard_unawaited_requests_replies_and_wakers() {
         for fail in [false, true] {
-            let mut session: TestWorkflow<()> = CoroutineWorkflow::new(|host| async move {
+            let mut workflow: TestWorkflow<()> = CoroutineWorkflow::new(|host| async move {
                 let unused = host.request(Ask::Text);
                 let answer = number(&host).await?;
                 drop(unused);
@@ -679,35 +686,35 @@ mod tests {
                     Ok(())
                 }
             });
-            session.advance().unwrap();
-            let ids: Vec<_> = session
+            workflow.advance().unwrap();
+            let ids: Vec<_> = workflow
                 .outstanding_requests()
                 .iter()
                 .map(|r| r.id)
                 .collect();
-            session.fulfill(ids[1], Answer::Number(1)).unwrap();
+            workflow.fulfill(ids[1], Answer::Number(1)).unwrap();
             if fail {
-                session
+                workflow
                     .fulfill(ids[0], Answer::Text("stored but never consumed".into()))
                     .unwrap();
             }
-            assert_eq!(session.advance().is_err(), fail);
-            assert!(session.outstanding_requests().is_empty());
-            let mailbox = lock(&session.shared);
+            assert_eq!(workflow.advance().is_err(), fail);
+            assert!(workflow.outstanding_requests().is_empty());
+            let mailbox = lock(&workflow.shared);
             assert!(mailbox.issued.is_empty());
             assert!(mailbox.replies.is_empty());
             assert!(mailbox.wakers.is_empty());
             drop(mailbox);
-            assert!(session
+            assert!(workflow
                 .fulfill(ids[0], Answer::Text("late".into()))
                 .is_err());
-            assert_eq!(session.finish().is_err(), fail);
+            assert_eq!(workflow.finish().is_err(), fail);
         }
     }
 
     #[test]
     fn early_failure_cancels_pending_collection_children_and_releases_the_mailbox() {
-        let mut session: TestWorkflow<()> = CoroutineWorkflow::new(|host| async move {
+        let mut workflow: TestWorkflow<()> = CoroutineWorkflow::new(|host| async move {
             let mut replies: FuturesUnordered<_> =
                 (0..3).map(|_| host.request(Ask::Number)).collect();
             match replies.next().await {
@@ -715,67 +722,67 @@ mod tests {
                 _ => Ok(()),
             }
         });
-        session.advance().unwrap();
-        let shared = Arc::downgrade(&session.shared);
-        let id = session.outstanding_requests()[1].id;
-        session.fulfill(id, Answer::Failed).unwrap();
-        assert_eq!(session.advance(), Err(TestError::HostFailed));
-        assert!(session.outstanding_requests().is_empty());
-        assert!(lock(&session.shared).wakers.is_empty());
-        drop(session);
+        workflow.advance().unwrap();
+        let shared = Arc::downgrade(&workflow.shared);
+        let id = workflow.outstanding_requests()[1].id;
+        workflow.fulfill(id, Answer::Failed).unwrap();
+        assert_eq!(workflow.advance(), Err(TestError::HostFailed));
+        assert!(workflow.outstanding_requests().is_empty());
+        assert!(lock(&workflow.shared).wakers.is_empty());
+        drop(workflow);
         assert!(shared.upgrade().is_none());
     }
 
     #[test]
     fn dropping_a_running_collection_does_not_leak_the_mailbox() {
-        let mut session: TestWorkflow<Vec<Answer>> = CoroutineWorkflow::new(|host| async move {
+        let mut workflow: TestWorkflow<Vec<Answer>> = CoroutineWorkflow::new(|host| async move {
             Ok(join_all((0..100).map(|_| host.request(Ask::Number))).await)
         });
-        session.advance().unwrap();
-        let shared = Arc::downgrade(&session.shared);
-        drop(session);
+        workflow.advance().unwrap();
+        let shared = Arc::downgrade(&workflow.shared);
+        drop(workflow);
         assert!(shared.upgrade().is_none());
     }
 
     #[test]
     fn unchecked_delivery_also_notifies_collection_children() {
-        let mut session: TestWorkflow<Vec<Answer>> = CoroutineWorkflow::new(|host| async move {
+        let mut workflow: TestWorkflow<Vec<Answer>> = CoroutineWorkflow::new(|host| async move {
             Ok(join_all((0..100).map(|_| host.request(Ask::Number))).await)
         });
-        session.advance().unwrap();
-        let ids: Vec<_> = session
+        workflow.advance().unwrap();
+        let ids: Vec<_> = workflow
             .outstanding_requests()
             .iter()
             .map(|r| r.id)
             .collect();
         for id in ids {
-            session.fulfill_unchecked(id, Answer::Text("bypassed".into()));
+            workflow.fulfill_unchecked(id, Answer::Text("bypassed".into()));
         }
-        assert_eq!(session.advance().unwrap(), Step::Complete);
+        assert_eq!(workflow.advance().unwrap(), Step::Complete);
         assert_eq!(
-            session.finish().unwrap(),
+            workflow.finish().unwrap(),
             vec![Answer::Text("bypassed".into()); 100]
         );
     }
 
     #[test]
     fn requests_issued_and_abandoned_on_the_first_poll_are_cancelled() {
-        let mut session: TestWorkflow<()> = CoroutineWorkflow::new(|host| async move {
+        let mut workflow: TestWorkflow<()> = CoroutineWorkflow::new(|host| async move {
             drop(host.request(Ask::Text));
             Ok(())
         });
-        assert_eq!(session.advance().unwrap(), Step::Complete);
-        assert!(session.outstanding_requests().is_empty());
+        assert_eq!(workflow.advance().unwrap(), Step::Complete);
+        assert!(workflow.outstanding_requests().is_empty());
         assert!(matches!(
-            session.fulfill(RequestId(0), Answer::Text("late".into())),
-            Err(TestError::Protocol(ProtocolError::SessionComplete))
+            workflow.fulfill(RequestId(0), Answer::Text("late".into())),
+            Err(TestError::Protocol(ProtocolError::WorkflowComplete))
         ));
-        session.finish().unwrap();
+        workflow.finish().unwrap();
     }
 
     #[test]
     fn ask_decodes_with_the_request_id_and_defers_issuing_until_polled() {
-        let mut session: TestWorkflow<u32> = CoroutineWorkflow::new(|host| async move {
+        let mut workflow: TestWorkflow<u32> = CoroutineWorkflow::new(|host| async move {
             let answer = host.ask(Ask::Number, |id, reply| {
                 assert_eq!(id, RequestId(0));
                 match reply {
@@ -786,10 +793,10 @@ mod tests {
             assert!(lock(&host.shared).issued.is_empty());
             answer.await
         });
-        session.advance().unwrap();
-        session.respond(|_| Answer::Number(4)).unwrap();
-        assert_eq!(session.advance().unwrap(), Step::Complete);
-        assert_eq!(session.finish().unwrap(), 8);
+        workflow.advance().unwrap();
+        workflow.respond(|_| Answer::Number(4)).unwrap();
+        assert_eq!(workflow.advance().unwrap(), Step::Complete);
+        assert_eq!(workflow.finish().unwrap(), 8);
     }
 
     async fn number(host: &Host<Ask>) -> Result<u32, TestError> {
@@ -808,41 +815,41 @@ mod tests {
         Ok(total)
     }
 
-    fn only_outstanding(session: &TestWorkflow<impl Send>) -> RequestId {
-        assert_eq!(session.outstanding_requests().len(), 1);
-        session.outstanding_requests()[0].id
+    fn only_outstanding(workflow: &TestWorkflow<impl Send>) -> RequestId {
+        assert_eq!(workflow.outstanding_requests().len(), 1);
+        workflow.outstanding_requests()[0].id
     }
 
     #[test]
     fn a_sequential_workflow_asks_one_thing_at_a_time() {
-        let mut session: TestWorkflow<u32> =
+        let mut workflow: TestWorkflow<u32> =
             CoroutineWorkflow::new(|host| sum_sequentially(host, 3));
         assert!(
-            session.outstanding_requests().is_empty(),
+            workflow.outstanding_requests().is_empty(),
             "nothing runs before the first advance"
         );
 
         for n in [1, 2, 3] {
-            assert_eq!(session.advance().unwrap(), Step::AwaitHost);
-            let id = only_outstanding(&session);
-            session.fulfill(id, Answer::Number(n)).unwrap();
+            assert_eq!(workflow.advance().unwrap(), Step::AwaitHost);
+            let id = only_outstanding(&workflow);
+            workflow.fulfill(id, Answer::Number(n)).unwrap();
         }
 
-        assert_eq!(session.advance().unwrap(), Step::Complete);
-        assert_eq!(session.advance().unwrap(), Step::Complete, "idempotently");
-        assert_eq!(session.finish().unwrap(), 6);
+        assert_eq!(workflow.advance().unwrap(), Step::Complete);
+        assert_eq!(workflow.advance().unwrap(), Step::Complete, "idempotently");
+        assert_eq!(workflow.finish().unwrap(), 6);
     }
 
     #[test]
     fn advancing_without_a_reply_waits() {
-        let mut session: TestWorkflow<u32> =
+        let mut workflow: TestWorkflow<u32> =
             CoroutineWorkflow::new(|host| sum_sequentially(host, 1));
 
-        assert_eq!(session.advance().unwrap(), Step::AwaitHost);
-        let id = only_outstanding(&session);
-        assert_eq!(session.advance().unwrap(), Step::AwaitHost);
+        assert_eq!(workflow.advance().unwrap(), Step::AwaitHost);
+        let id = only_outstanding(&workflow);
+        assert_eq!(workflow.advance().unwrap(), Step::AwaitHost);
         assert_eq!(
-            only_outstanding(&session),
+            only_outstanding(&workflow),
             id,
             "the same request, not a new one"
         );
@@ -850,7 +857,7 @@ mod tests {
 
     #[test]
     fn requests_issued_together_are_outstanding_together_and_answerable_in_any_order() {
-        let mut session: TestWorkflow<(u32, String)> = CoroutineWorkflow::new(|host| async move {
+        let mut workflow: TestWorkflow<(u32, String)> = CoroutineWorkflow::new(|host| async move {
             let number = host.request(Ask::Number);
             let text = host.request(Ask::Text);
             match (text.await, number.await) {
@@ -859,8 +866,8 @@ mod tests {
             }
         });
 
-        assert_eq!(session.advance().unwrap(), Step::AwaitHost);
-        let ids: Vec<_> = session
+        assert_eq!(workflow.advance().unwrap(), Step::AwaitHost);
+        let ids: Vec<_> = workflow
             .outstanding_requests()
             .iter()
             .map(|r| r.id)
@@ -868,125 +875,125 @@ mod tests {
         assert_eq!(ids.len(), 2);
 
         // The number first, though the workflow awaits the text first.
-        session.fulfill(ids[0], Answer::Number(7)).unwrap();
-        assert_eq!(session.advance().unwrap(), Step::AwaitHost);
-        session.fulfill(ids[1], Answer::Text("x".into())).unwrap();
+        workflow.fulfill(ids[0], Answer::Number(7)).unwrap();
+        assert_eq!(workflow.advance().unwrap(), Step::AwaitHost);
+        workflow.fulfill(ids[1], Answer::Text("x".into())).unwrap();
 
-        assert_eq!(session.advance().unwrap(), Step::Complete);
-        assert_eq!(session.finish().unwrap(), (7, "x".to_string()));
+        assert_eq!(workflow.advance().unwrap(), Step::Complete);
+        assert_eq!(workflow.finish().unwrap(), (7, "x".to_string()));
     }
 
     #[test]
     fn a_request_issued_by_the_start_closure_is_outstanding_at_once() {
-        let session: TestWorkflow<Answer> = CoroutineWorkflow::new(|host| {
+        let workflow: TestWorkflow<Answer> = CoroutineWorkflow::new(|host| {
             let reply = host.request(Ask::Text);
             async move { Ok(reply.await) }
         });
 
-        assert_eq!(session.outstanding_requests()[0].kind, Ask::Text);
+        assert_eq!(workflow.outstanding_requests()[0].kind, Ask::Text);
     }
 
     #[test]
-    fn a_workflow_error_is_returned_once_and_poisons_the_session() {
-        let mut session: TestWorkflow<u32> =
+    fn a_workflow_error_is_returned_once_and_poisons_the_workflow() {
+        let mut workflow: TestWorkflow<u32> =
             CoroutineWorkflow::new(|host| sum_sequentially(host, 2));
 
-        session.advance().unwrap();
-        let id = only_outstanding(&session);
-        session.fulfill(id, Answer::Failed).unwrap();
+        workflow.advance().unwrap();
+        let id = only_outstanding(&workflow);
+        workflow.fulfill(id, Answer::Failed).unwrap();
 
-        assert_eq!(session.advance(), Err(TestError::HostFailed));
-        let failed = TestError::Protocol(ProtocolError::SessionFailed(Failure::new(
+        assert_eq!(workflow.advance(), Err(TestError::HostFailed));
+        let failed = TestError::Protocol(ProtocolError::WorkflowFailed(Failure::new(
             "Start",
             &TestError::HostFailed,
         )));
-        assert_eq!(session.advance(), Err(failed.clone()));
-        assert_eq!(session.fulfill(id, Answer::Number(1)), Err(failed.clone()));
-        assert_eq!(session.finish(), Err(failed));
+        assert_eq!(workflow.advance(), Err(failed.clone()));
+        assert_eq!(workflow.fulfill(id, Answer::Number(1)), Err(failed.clone()));
+        assert_eq!(workflow.finish(), Err(failed));
     }
 
     #[test]
     fn phases_follow_stages_and_preserve_the_one_that_fails() {
-        let mut session: TestWorkflow<u32> = CoroutineWorkflow::new(|host| async move {
+        let mut workflow: TestWorkflow<u32> = CoroutineWorkflow::new(|host| async move {
             host.set_phase("Reading > First");
             let first = number(&host).await?;
             host.set_phase("Reading > Second");
             Ok(first + number(&host).await?)
         });
-        assert_eq!(session.phase(), "Start");
-        session.advance().unwrap();
-        assert_eq!(session.phase(), "Reading > First");
-        let first = only_outstanding(&session);
-        session.fulfill(first, Answer::Number(1)).unwrap();
-        session.advance().unwrap();
-        assert_eq!(session.phase(), "Reading > Second");
-        let second = only_outstanding(&session);
-        session.fulfill(second, Answer::Failed).unwrap();
-        assert_eq!(session.advance(), Err(TestError::HostFailed));
+        assert_eq!(workflow.phase(), "Start");
+        workflow.advance().unwrap();
+        assert_eq!(workflow.phase(), "Reading > First");
+        let first = only_outstanding(&workflow);
+        workflow.fulfill(first, Answer::Number(1)).unwrap();
+        workflow.advance().unwrap();
+        assert_eq!(workflow.phase(), "Reading > Second");
+        let second = only_outstanding(&workflow);
+        workflow.fulfill(second, Answer::Failed).unwrap();
+        assert_eq!(workflow.advance(), Err(TestError::HostFailed));
 
-        let failed = TestError::Protocol(ProtocolError::SessionFailed(Failure::new(
+        let failed = TestError::Protocol(ProtocolError::WorkflowFailed(Failure::new(
             "Reading > Second",
             &TestError::HostFailed,
         )));
-        assert_eq!(session.phase(), "Reading > Second");
-        assert_eq!(session.advance(), Err(failed.clone()));
+        assert_eq!(workflow.phase(), "Reading > Second");
+        assert_eq!(workflow.advance(), Err(failed.clone()));
         assert_eq!(
-            session.fulfill(second, Answer::Number(2)),
+            workflow.fulfill(second, Answer::Number(2)),
             Err(failed.clone())
         );
-        assert_eq!(session.phase(), "Reading > Second");
-        assert_eq!(session.finish(), Err(failed));
+        assert_eq!(workflow.phase(), "Reading > Second");
+        assert_eq!(workflow.finish(), Err(failed));
     }
 
     #[test]
     fn phases_can_be_set_before_polling_and_complete_after_success() {
-        let mut session: TestWorkflow<u32> = CoroutineWorkflow::new(|host| {
+        let mut workflow: TestWorkflow<u32> = CoroutineWorkflow::new(|host| {
             host.set_phase("Initialized");
             async move {
                 host.set_phase("Calculating");
                 Ok(7)
             }
         });
-        assert_eq!(session.phase(), "Initialized");
-        assert_eq!(session.advance().unwrap(), Step::Complete);
-        assert_eq!(session.phase(), "Complete");
-        assert_eq!(session.advance().unwrap(), Step::Complete);
-        assert_eq!(session.finish().unwrap(), 7);
+        assert_eq!(workflow.phase(), "Initialized");
+        assert_eq!(workflow.advance().unwrap(), Step::Complete);
+        assert_eq!(workflow.phase(), "Complete");
+        assert_eq!(workflow.advance().unwrap(), Step::Complete);
+        assert_eq!(workflow.finish().unwrap(), 7);
     }
 
     #[test]
     fn a_stalled_workflow_preserves_its_phase_on_every_later_call() {
-        let mut session: TestWorkflow<u32> = CoroutineWorkflow::new(|host| async move {
+        let mut workflow: TestWorkflow<u32> = CoroutineWorkflow::new(|host| async move {
             host.set_phase("InvalidWait");
             pending().await
         });
         assert_eq!(
-            session.advance(),
+            workflow.advance(),
             Err(TestError::Protocol(ProtocolError::WorkflowStalled))
         );
-        let failed = TestError::Protocol(ProtocolError::SessionFailed(Failure::new(
+        let failed = TestError::Protocol(ProtocolError::WorkflowFailed(Failure::new(
             "InvalidWait",
             &ProtocolError::WorkflowStalled,
         )));
-        assert_eq!(session.phase(), "InvalidWait");
-        assert_eq!(session.advance(), Err(failed.clone()));
+        assert_eq!(workflow.phase(), "InvalidWait");
+        assert_eq!(workflow.advance(), Err(failed.clone()));
         assert_eq!(
-            session.fulfill(RequestId(0), Answer::Failed),
+            workflow.fulfill(RequestId(0), Answer::Failed),
             Err(failed.clone())
         );
-        assert_eq!(session.finish(), Err(failed));
+        assert_eq!(workflow.finish(), Err(failed));
     }
 
     #[test]
     fn workflows_record_and_replay_success_and_failure_with_phases() {
-        fn session() -> TestWorkflow<u32> {
+        fn workflow() -> TestWorkflow<u32> {
             CoroutineWorkflow::new(|host| async move {
                 host.set_phase("AwaitingNumber");
                 number(&host).await
             })
         }
         for reply in [Answer::Number(7), Answer::Failed] {
-            let mut recorded = crate::Recorder::new(session());
+            let mut recorded = crate::Recorder::new(workflow());
             assert_eq!(recorded.phase(), "Start");
             recorded.advance().unwrap();
             assert_eq!(recorded.phase(), "AwaitingNumber");
@@ -999,7 +1006,7 @@ mod tests {
             } else {
                 assert_eq!(recorded.phase(), "Complete");
             }
-            let replayed = crate::replay(session(), recorded.transcript()).unwrap();
+            let replayed = crate::replay(workflow(), recorded.transcript()).unwrap();
             assert_eq!(replayed.phase(), recorded.phase());
             assert_eq!(replayed.finish(), recorded.finish());
         }
@@ -1007,19 +1014,19 @@ mod tests {
 
     #[test]
     fn fulfill_rejects_an_unknown_id_and_a_reply_of_the_wrong_kind() {
-        let mut session: TestWorkflow<u32> =
+        let mut workflow: TestWorkflow<u32> =
             CoroutineWorkflow::new(|host| sum_sequentially(host, 1));
-        session.advance().unwrap();
-        let id = only_outstanding(&session);
+        workflow.advance().unwrap();
+        let id = only_outstanding(&workflow);
 
         assert_eq!(
-            session.fulfill(RequestId(99), Answer::Number(1)),
+            workflow.fulfill(RequestId(99), Answer::Number(1)),
             Err(TestError::Protocol(ProtocolError::UnknownRequest(
                 RequestId(99)
             )))
         );
         assert_eq!(
-            session.fulfill(id, Answer::Text("no".into())),
+            workflow.fulfill(id, Answer::Text("no".into())),
             Err(TestError::Protocol(ProtocolError::ReplyMismatch {
                 id,
                 expected: "Number"
@@ -1027,47 +1034,47 @@ mod tests {
         );
 
         // Still outstanding, and answerable properly.
-        session.fulfill(id, Answer::Number(4)).unwrap();
+        workflow.fulfill(id, Answer::Number(4)).unwrap();
         assert_eq!(
-            session.fulfill(id, Answer::Number(4)),
+            workflow.fulfill(id, Answer::Number(4)),
             Err(TestError::Protocol(ProtocolError::UnknownRequest(id))),
             "not twice"
         );
-        assert_eq!(session.advance().unwrap(), Step::Complete);
+        assert_eq!(workflow.advance().unwrap(), Step::Complete);
     }
 
     #[test]
-    fn a_finished_session_refuses_further_replies() {
-        let mut session: TestWorkflow<u32> = CoroutineWorkflow::new(|_| async { Ok(1) });
+    fn a_finished_workflow_refuses_further_replies() {
+        let mut workflow: TestWorkflow<u32> = CoroutineWorkflow::new(|_| async { Ok(1) });
 
-        assert_eq!(session.advance().unwrap(), Step::Complete);
+        assert_eq!(workflow.advance().unwrap(), Step::Complete);
         assert_eq!(
-            session.fulfill(RequestId(0), Answer::Number(1)),
-            Err(TestError::Protocol(ProtocolError::SessionComplete))
+            workflow.fulfill(RequestId(0), Answer::Number(1)),
+            Err(TestError::Protocol(ProtocolError::WorkflowComplete))
         );
     }
 
     #[test]
     fn finishing_early_is_refused() {
-        let session: TestWorkflow<u32> = CoroutineWorkflow::new(|host| sum_sequentially(host, 1));
+        let workflow: TestWorkflow<u32> = CoroutineWorkflow::new(|host| sum_sequentially(host, 1));
 
         assert_eq!(
-            session.finish(),
-            Err(TestError::Protocol(ProtocolError::SessionNotComplete))
+            workflow.finish(),
+            Err(TestError::Protocol(ProtocolError::WorkflowNotComplete))
         );
     }
 
     #[test]
     fn waiting_on_something_the_host_cannot_answer_is_reported_not_hung() {
-        let mut session: TestWorkflow<u32> = CoroutineWorkflow::new(|_| pending());
+        let mut workflow: TestWorkflow<u32> = CoroutineWorkflow::new(|_| pending());
 
         assert_eq!(
-            session.advance(),
+            workflow.advance(),
             Err(TestError::Protocol(ProtocolError::WorkflowStalled))
         );
         assert_eq!(
-            session.advance(),
-            Err(TestError::Protocol(ProtocolError::SessionFailed(
+            workflow.advance(),
+            Err(TestError::Protocol(ProtocolError::WorkflowFailed(
                 Failure::new("Start", &ProtocolError::WorkflowStalled,)
             )))
         );
@@ -1075,31 +1082,31 @@ mod tests {
 
     #[test]
     fn fulfill_unchecked_bypasses_payload_validation() {
-        let mut session: TestWorkflow<Answer> =
+        let mut workflow: TestWorkflow<Answer> =
             CoroutineWorkflow::new(|host| async move { Ok(host.request(Ask::Number).await) });
-        session.advance().unwrap();
-        let id = only_outstanding(&session);
+        workflow.advance().unwrap();
+        let id = only_outstanding(&workflow);
 
-        session.fulfill_unchecked(id, Answer::Text("wrong".into()));
+        workflow.fulfill_unchecked(id, Answer::Text("wrong".into()));
 
-        assert!(session.outstanding_requests().is_empty());
-        assert_eq!(session.advance().unwrap(), Step::Complete);
-        assert_eq!(session.finish().unwrap(), Answer::Text("wrong".into()));
+        assert!(workflow.outstanding_requests().is_empty());
+        assert_eq!(workflow.advance().unwrap(), Step::Complete);
+        assert_eq!(workflow.finish().unwrap(), Answer::Text("wrong".into()));
     }
 
     #[test]
     fn debug_output_names_the_state_and_what_is_outstanding() {
-        let mut session: TestWorkflow<u32> =
+        let mut workflow: TestWorkflow<u32> =
             CoroutineWorkflow::new(|host| sum_sequentially(host, 1));
-        session.advance().unwrap();
+        workflow.advance().unwrap();
 
         let host = Host::<Ask> {
-            shared: Arc::clone(&session.shared),
+            shared: Arc::clone(&workflow.shared),
         };
         let pending = host.clone().request(Ask::Text);
 
-        assert!(format!("{session:?}").contains("Running"));
-        assert!(format!("{session:?}").contains("Number"));
+        assert!(format!("{workflow:?}").contains("Running"));
+        assert!(format!("{workflow:?}").contains("Number"));
         assert_eq!(format!("{host:?}"), "Host { .. }");
         assert_eq!(
             format!("{pending:?}"),
