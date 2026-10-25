@@ -299,15 +299,6 @@ cargo install commitlint-rs --locked
 printf '%s\n' 'ci: Verify TOML formatting' | commitlint -g .commitlintrc.yml
 ```
 
-Repository administrators must grant this repository access to these
-organization secrets:
-
-| Secret | Purpose |
-| --- | --- |
-| `RELEASE_PLZ_ORG_TOKEN` | Release-plz GitHub access for release PRs, tags, and releases |
-| `CRATES_IO_ORG_TOKEN` | Publishing the crate to crates.io |
-| `CODECOV_ORG_TOKEN` | Uploading coverage to Codecov |
-
 Coverage uploads run only for same-repository PRs and trusted branch events;
 fork PRs still run tests and generate coverage without secrets. Release
 automation runs only on `main`; the fuzz harness is never published.
