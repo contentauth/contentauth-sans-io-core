@@ -1,6 +1,7 @@
 # contentauth-sans-io-core
 
 [![CI](https://github.com/contentauth/contentauth-sans-io-core/actions/workflows/ci.yml/badge.svg)](https://github.com/contentauth/contentauth-sans-io-core/actions/workflows/ci.yml)
+[![Codecov](https://codecov.io/gh/contentauth/contentauth-sans-io-core/branch/main/graph/badge.svg)](https://codecov.io/gh/contentauth/contentauth-sans-io-core)
 [![crates.io](https://img.shields.io/crates/v/contentauth-sans-io-core.svg)](https://crates.io/crates/contentauth-sans-io-core)
 [![Documentation](https://docs.rs/contentauth-sans-io-core/badge.svg)](https://docs.rs/contentauth-sans-io-core)
 
