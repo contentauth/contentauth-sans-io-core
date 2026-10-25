@@ -1,0 +1,27 @@
+name: PR title
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  conventional-commit:
+    name: Conventional Commit title
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if ! printf '%s\n' "$PR_TITLE" | grep -Eq '^(feat|fix|docs|perf|refactor|test|ci|build|chore|revert|update)(\([[:alnum:]_./-]+\))?!?: [^[:space:]].*$'; then
+            echo "::error::Use a Conventional Commit title, for example: feat: Add host-driven workflows"
+            exit 1
+          fi
