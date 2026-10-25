@@ -12,7 +12,7 @@ name = "contentauth-sans-io-core"
 readme = "README.md"
 repository = "https://github.com/contentauth/contentauth-sans-io-core"
 rust-version = "1.96.0"
-version = "0.1.0"
+version = "0.2.0"
 
 [package.metadata.docs.rs]
 all-features = true
