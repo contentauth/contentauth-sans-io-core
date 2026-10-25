@@ -12,10 +12,6 @@ _25 October 2026_
 
 * [**breaking**] Adopt workflow terminology and prefer coroutine workflows ([#8](https://github.com/contentauth/contentauth-sans-io-core/pull/8))
 
-### Fixed
-
-* Trigger releases for breaking conventional commits ([#9](https://github.com/contentauth/contentauth-sans-io-core/pull/9))
-
 ## [0.1.0](https://github.com/contentauth/contentauth-sans-io-core/releases/tag/v0.1.0)
 _25 October 2026_
 
